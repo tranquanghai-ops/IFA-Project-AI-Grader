@@ -38,3 +38,8 @@ export const saveGeminiKeyPool = (keysInput: string[], requestedIndex: number): 
 };
 
 export const countGeminiKeys = (pool: GeminiKeyPool): number => pool.keys.filter(Boolean).length;
+
+export const getVisibleGeminiKeySlots = (keys: string[]): number => {
+  const lastUsedSlot = keys.reduce((last, value, index) => value ? index + 1 : last, 0);
+  return Math.min(3, Math.max(1, lastUsedSlot));
+};
