@@ -46,16 +46,13 @@ import {
 // trình duyệt. Không nhúng khóa vào mã nguồn và không đưa khóa vào JSON tiến trình.
 const GEMINI_API_KEY_STORAGE = "ifa-thesis-gemini-api-key";
 const GEMINI_MODEL_SELECTION_STORAGE = "ifa-thesis-gemini-model-selection";
-const GEMINI_MODEL_PRIMARY = "gemini-3.7-flash";
+const GEMINI_MODEL_PRIMARY = "gemini-3-flash-preview";
 const GEMINI_MODEL_FALLBACK_CHAIN = [
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
   "gemini-3-flash-preview",
   "gemini-2.5-flash"
 ];
 const GEMINI_MODEL_OPTIONS = [
-  { value: "auto", label: "Tự động", detail: "3.7 → 3.6 → 3.5 → Flash Preview → 2.5 khi model quá tải" },
+  { value: "auto", label: "Tự động tiết kiệm", detail: "Flash Preview → 2.5; không tự dùng 3.6/3.7" },
   { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash", detail: "Mới nhất, chất lượng cao" },
   { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash", detail: "Ổn định, cân bằng" },
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash", detail: "Ổn định, tải nhẹ hơn" },
