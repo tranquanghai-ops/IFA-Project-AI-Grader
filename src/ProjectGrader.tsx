@@ -43,6 +43,7 @@ import {
   UserCheck,
   UserX
 } from 'lucide-react';
+import { countGeminiKeys, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
 
 const APP_VERSION = "V6";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
@@ -397,11 +398,15 @@ export default function App() {
   const [globalExam, setGlobalExam] = useState('Quá trình 1');
   const [globalLecturer, setGlobalLecturer] = useState('');
   const [globalGradingStrategy, setGlobalGradingStrategy] = useState(DEFAULT_GRADING_STRATEGY);
-  const [apiKey, setApiKey] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-api-key') || '' : '');
+  const [apiKeyPool, setApiKeyPool] = useState(() => loadGeminiKeyPool([
+    typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-api-key') || '' : ''
+  ]));
   const [activeGeminiModel, setActiveGeminiModel] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-model') || DEFAULT_GEMINI_MODEL : DEFAULT_GEMINI_MODEL);
   const [reviewGeminiModel, setReviewGeminiModel] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-review-model') || DEFAULT_REVIEW_MODEL : DEFAULT_REVIEW_MODEL);
   const [showApiSettings, setShowApiSettings] = useState(false);
-  const [draftApiKey, setDraftApiKey] = useState(apiKey);
+  const [draftApiKeys, setDraftApiKeys] = useState(() => [...apiKeyPool.keys]);
+  const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);
+  const apiKey = apiKeyPool.keys[apiKeyPool.activeIndex] || '';
 
   const rubricFileInputRef = useRef(null);
   const projectFileInputRef = useRef(null); 
@@ -462,17 +467,23 @@ export default function App() {
   }, []);
 
   const saveApiSettings = () => {
-    const cleanKey = draftApiKey.trim();
-    if (!cleanKey) {
-      showToast("Vui lòng nhập Gemini API key trước khi lưu.", "error");
+    const nextPool = saveGeminiKeyPool(draftApiKeys, draftActiveApiKeyIndex);
+    if (!nextPool.keys.some(Boolean)) {
+      showToast("Vui lòng nhập ít nhất một Gemini API key trước khi lưu.", "error");
       return;
     }
-    setApiKey(cleanKey);
-    localStorage.setItem('ifa-project-gemini-api-key', cleanKey);
+    setApiKeyPool(nextPool);
+    localStorage.setItem('ifa-project-gemini-api-key', nextPool.keys[nextPool.activeIndex]);
     localStorage.setItem('ifa-project-gemini-model', activeGeminiModel);
     localStorage.setItem('ifa-project-review-model', reviewGeminiModel);
     setShowApiSettings(false);
-    showToast("Đã lưu cấu hình AI trên trình duyệt này.", "success");
+    showToast(`Đã lưu ${countGeminiKeys(nextPool)} API key; đang dùng khóa ${nextPool.activeIndex + 1}.`, "success");
+  };
+
+  const openApiSettings = () => {
+    setDraftApiKeys([...apiKeyPool.keys]);
+    setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
+    setShowApiSettings(true);
   };
 
   useEffect(() => {
@@ -481,7 +492,7 @@ export default function App() {
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
-    setTimeout(() => setToast({ message: "", type: "success" }), 4000);
+    if (type !== "error") setTimeout(() => setToast({ message: "", type: "success" }), 4000);
   };
 
   const [pdfLibLoaded, setPdfjsLoaded] = useState(false);
@@ -1461,8 +1472,65 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     }
   };
 
+  const reviewDuplicateUploads = (incomingFiles) => {
+    const accepted = [];
+    const replacementIds = new Set();
+    const comparisonPool = [...projects];
+
+    incomingFiles.forEach(file => {
+      const parsed = extractInfoFromFilename(file.name);
+      const incomingStudentId = cleanId(parsed.fallbackId || '');
+      const normalizedName = String(file.name || '').trim().toLowerCase();
+      const exactDuplicate = comparisonPool.find(project =>
+        String(project.fileName || '').trim().toLowerCase() === normalizedName
+        && Number(project.fileSize || 0) > 0
+        && Number(project.fileSize) === Number(file.size)
+        && (!incomingStudentId || cleanId(project.studentId || project.fallbackId || '') === incomingStudentId)
+      );
+
+      if (exactDuplicate) {
+        const addAgain = window.confirm(
+          `Tệp “${file.name}” trùng tên, dung lượng${incomingStudentId ? ' và MSSV' : ''} với bài đã nạp.\n\nBấm OK để vẫn nạp thêm; bấm Hủy để bỏ qua tệp trùng.`
+        );
+        if (!addAgain) return;
+      } else if (incomingStudentId) {
+        const sameStudent = comparisonPool.find(project =>
+          cleanId(project.studentId || project.fallbackId || '') === incomingStudentId
+        );
+        if (sameStudent) {
+          const replaceExisting = window.confirm(
+            `MSSV ${incomingStudentId} đã có tệp “${sameStudent.fileName || 'không rõ tên'}”, nhưng tệp mới có tên hoặc dung lượng khác.\n\nBấm OK để THAY THẾ bài cũ; bấm Hủy để chọn giữ cả hai hoặc bỏ qua.`
+          );
+          if (replaceExisting) {
+            replacementIds.add(sameStudent.id);
+            const oldIndex = comparisonPool.findIndex(item => item.id === sameStudent.id);
+            if (oldIndex >= 0) comparisonPool.splice(oldIndex, 1);
+          } else {
+            const keepBoth = window.confirm(
+              `Giữ cả hai tệp của MSSV ${incomingStudentId} để chấm như hai bài riêng?\n\nBấm OK để giữ cả hai; bấm Hủy để bỏ qua tệp mới.`
+            );
+            if (!keepBoth) return;
+          }
+        }
+      }
+
+      accepted.push(file);
+      comparisonPool.push({ id: `incoming-${accepted.length}`, fileName: file.name, fileSize: file.size, studentId: incomingStudentId, fallbackId: incomingStudentId });
+    });
+
+    if (replacementIds.size > 0) {
+      setProjects(previous => {
+        previous.filter(project => replacementIds.has(project.id)).forEach(project => {
+          if (String(project.fileUrl || '').startsWith('blob:')) URL.revokeObjectURL(project.fileUrl);
+        });
+        return previous.filter(project => !replacementIds.has(project.id));
+      });
+    }
+    return accepted;
+  };
+
   const handleBatchUpload = (e) => {
-    const files = Array.from(e.target.files);
+    const files = reviewDuplicateUploads(Array.from(e.target.files));
     if (!files.length) return;
 
     const initialGrades = {};
@@ -1508,6 +1576,7 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
         const customProject = {
           id: newId,
           fileName: file.name,
+          fileSize: file.size,
           studentName: finalName,
           studentId: finalId,
           fallbackName: fallbackName,
@@ -3121,7 +3190,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         <div className="fixed top-24 left-1/2 transform -translate-x-1/2 z-[10000] animate-fade-in">
           <div className={`flex items-center gap-2 px-5 py-3 rounded-2xl shadow-2xl border text-xs font-bold font-mono tracking-wide ${toast.type === "success" ? "bg-emerald-950/90 text-emerald-400 border-emerald-500/30" : "bg-rose-950/90 text-rose-400 border-rose-500/30"}`}>
             {toast.type === "success" ? <CheckCircle className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
-            <span>{toast.message}</span>
+            <span className="max-h-32 max-w-[75vw] overflow-y-auto whitespace-pre-wrap">{toast.message}</span>
+            <button type="button" onClick={() => setToast({ message: "", type: "success" })} className="rounded-lg p-1.5 hover:bg-white/10" aria-label="Đóng thông báo" title="Đóng"><X className="h-4 w-4" /></button>
           </div>
         </div>
       )}
@@ -3136,8 +3206,17 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               </div>
               {apiKey && <button type="button" onClick={() => setShowApiSettings(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><X className="h-4 w-4" /></button>}
             </div>
-            <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Gemini API key</label>
-            <input type="password" value={draftApiKey} onChange={(event) => setDraftApiKey(event.target.value)} placeholder="Dán API key từ Google AI Studio" className={`w-full rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-indigo-500 ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`} />
+            <label className="mb-2 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Kho Gemini API key — tối đa 3 khóa</label>
+            <div className="space-y-2">
+              {[0, 1, 2].map(index => (
+                <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
+                  <input type="radio" name="project-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => setDraftActiveApiKeyIndex(index)} />
+                  <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
+                  <input type="password" autoComplete="off" value={draftApiKeys[index] || ''} onChange={event => setDraftApiKeys(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value))} placeholder={`Dán API key tài khoản ${index + 1}`} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-xs font-mono outline-none focus:border-indigo-500 ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`} />
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-[9px] text-slate-500">Chọn nút tròn để đặt khóa đang hoạt động. Hệ thống không tự chuyển khóa khi hết quota.</p>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Model chấm bài chính</label>
@@ -3181,11 +3260,11 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         <div className="flex justify-end gap-2 mb-4 relative z-40">
           <button
             type="button"
-            onClick={() => { setDraftApiKey(apiKey); setShowApiSettings(true); }}
+            onClick={openApiSettings}
             className={`p-2.5 rounded-xl border transition-all flex items-center gap-2 text-xs font-black cursor-pointer shadow-lg active:scale-95 ${apiKey ? (theme === 'dark' ? 'bg-slate-950 border-emerald-700/60 text-emerald-400' : 'bg-white border-emerald-300 text-emerald-700') : 'bg-rose-950 border-rose-600 text-rose-300 animate-pulse'}`}
             title="Cấu hình API và model Gemini"
           >
-            <Sliders className="w-4 h-4" /> {apiKey ? `AI: ${activeGeminiModel.replace('gemini-', '')}` : 'Nhập API key'}
+            <Sliders className="w-4 h-4" /> {apiKey ? `Khóa ${apiKeyPool.activeIndex + 1} · ${activeGeminiModel.replace('gemini-', '')}` : 'Nhập API key'}
           </button>
           <button
             type="button"
