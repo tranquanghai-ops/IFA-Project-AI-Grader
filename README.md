@@ -1,42 +1,36 @@
-# IFA Project AI Grader V6
+# IFA Unified AI Grader — bản hợp nhất thử nghiệm
 
-Ứng dụng hỗ trợ giảng viên chấm **đồ án môn học và bài vẽ tay** theo rubric do giảng viên tải lên hoặc tự nhập.
+Ứng dụng hợp nhất hai quy trình:
 
-Ứng dụng này không phải bản chấm thuyết minh tốt nghiệp và không có chế độ chấm phản biện.
+- **Chấm đồ án môn học / bài vẽ:** sử dụng mô-đun IFA Project AI Grader V6.
+- **Chấm thuyết minh DATN/DATH:** sử dụng mô-đun IFA Thesis AI Grader V3.2, giữ quy trình GVHD và phản biện.
 
-## Chức năng chính
+## Trạng thái nhánh
 
-- Đọc ảnh, Word và PDF; PDF có thể đọc toàn bộ, theo mục chính, theo cụm 8–150 trang hoặc chia 2–3 lượt.
-- Chấm theo rubric môn học, lưu phiên bản điểm và phiên bản nhận xét.
-- Cân chỉnh tương quan điểm, hiển thị điểm trước/sau và hoàn tác từng bài.
-- Kiểm tra riêng dấu hiệu nội dung tạo sinh, có báo cáo chi tiết và kết luận của giảng viên.
-- OCR tên/MSSV, đối chiếu danh sách lớp, xuất CSV và phiếu PDF.
-- Hiển thị ba dòng tiến trình mới nhất khi chấm.
-- Lưu/khôi phục toàn bộ tiến trình bằng JSON.
+Nhánh `codex/unified-v1` là bản thử nghiệm, chưa thay thế ứng dụng đang chạy trên `main`.
 
-## Cấu hình AI
+Ở màn hình đầu, giảng viên chọn loại nội dung cần chấm. Hai mô-đun được tải riêng để giảm thời gian mở trang. Khi đổi chế độ trong cùng phiên trình duyệt, dữ liệu đang nhập của mô-đun trước vẫn được giữ.
 
-Khi mở lần đầu, nhập Gemini API key trong **Cấu hình AI**. Khóa chỉ lưu bằng `localStorage` trên trình duyệt hiện tại, không nằm trong mã nguồn hay file JSON xuất ra.
+## An toàn dữ liệu
 
-- Model chấm chính mặc định: `gemini-3.7-flash`.
-- Model Flash Review mặc định: `gemini-3.1-flash-lite`, dùng cho OCR, phân tích rubric và danh sách sinh viên.
+- API key chỉ lưu cục bộ trong trình duyệt của giảng viên.
+- Hai chế độ vẫn dùng vùng lưu trữ và schema tiến trình riêng.
+- Không nhúng API key vào mã nguồn hoặc JSON xuất ra.
+- Repository hiện tại vẫn giữ nhánh `main` nguyên vẹn cho đến khi bản hợp nhất được kiểm tra đầy đủ.
 
-Không nhập API key trực tiếp vào mã nguồn hoặc commit lên GitHub.
-
-## Chạy trên máy
+## Chạy thử
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Build
+## Kiểm tra biên dịch
 
 ```bash
+npm ci
 npm run build
 ```
-
-Mỗi lần cập nhật nhánh `main`, GitHub Actions sẽ build và triển khai GitHub Pages tự động.
 
 ---
 
