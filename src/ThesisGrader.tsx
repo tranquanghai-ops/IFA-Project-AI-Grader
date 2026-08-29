@@ -40,7 +40,7 @@ import {
   Copy,
   Save
 } from 'lucide-react';
-import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
+import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -6461,7 +6461,7 @@ ${text.substring(0, 45000)}`;
               {apiKey && <button type="button" onClick={() => setShowApiKeyModal(false)} className={`p-2 rounded-xl border cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-400' : 'bg-white border-slate-300 text-slate-600'}`}><X className="w-4 h-4" /></button>}
             </div>
             <div className="p-5 flex flex-col gap-3">
-              <label className="text-[10px] font-bold uppercase text-slate-500">Kho Gemini API key — tối đa 3 khóa</label>
+              <label className="text-[10px] font-bold uppercase text-slate-500">Kho Gemini API key — tối đa 10 khóa</label>
               <div className="space-y-2">
                 {Array.from({ length: visibleApiKeySlots }, (_, index) => index).map(index => (
                   <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
@@ -6473,8 +6473,8 @@ ${text.substring(0, 45000)}`;
               </div>
               <div className="flex items-center justify-between gap-3">
                 <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa hoạt động. Hệ thống chỉ kiểm tra và sử dụng khóa đang chọn, không tự luân phiên quota.</p>
-                {visibleApiKeySlots < 3 && (
-                  <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(3, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); setApiKeyStatus(''); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
+                {visibleApiKeySlots < MAX_GEMINI_API_KEYS && (
+                  <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(MAX_GEMINI_API_KEYS, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); setApiKeyStatus(''); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
                 )}
               </div>
               <label className="text-[10px] font-bold uppercase text-slate-500 mt-1">Mô hình dùng để chấm</label>
