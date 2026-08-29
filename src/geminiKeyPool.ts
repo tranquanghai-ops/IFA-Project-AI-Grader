@@ -1,4 +1,5 @@
 export const GEMINI_KEY_POOL_STORAGE = "ifa-unified-gemini-api-key-pool-v1";
+export const MAX_GEMINI_API_KEYS = 10;
 
 export type GeminiKeyPool = {
   keys: string[];
@@ -7,7 +8,7 @@ export type GeminiKeyPool = {
 
 const normalizeKeys = (values: unknown): string[] => {
   const input = Array.isArray(values) ? values : [];
-  return [0, 1, 2].map(index => String(input[index] || "").trim());
+  return Array.from({ length: MAX_GEMINI_API_KEYS }, (_, index) => String(input[index] || "").trim());
 };
 
 export const loadGeminiKeyPool = (legacyKeys: string[] = []): GeminiKeyPool => {
@@ -16,7 +17,7 @@ export const loadGeminiKeyPool = (legacyKeys: string[] = []): GeminiKeyPool => {
     const parsed = JSON.parse(localStorage.getItem(GEMINI_KEY_POOL_STORAGE) || "null");
     if (parsed && Array.isArray(parsed.keys)) {
       const keys = normalizeKeys(parsed.keys);
-      const requestedIndex = Math.max(0, Math.min(2, Number(parsed.activeIndex) || 0));
+      const requestedIndex = Math.max(0, Math.min(MAX_GEMINI_API_KEYS - 1, Number(parsed.activeIndex) || 0));
       const activeIndex = keys[requestedIndex] ? requestedIndex : Math.max(0, keys.findIndex(Boolean));
       return { keys, activeIndex };
     }
@@ -28,7 +29,7 @@ export const loadGeminiKeyPool = (legacyKeys: string[] = []): GeminiKeyPool => {
 
 export const saveGeminiKeyPool = (keysInput: string[], requestedIndex: number): GeminiKeyPool => {
   const keys = normalizeKeys(keysInput);
-  const safeRequestedIndex = Math.max(0, Math.min(2, Number(requestedIndex) || 0));
+  const safeRequestedIndex = Math.max(0, Math.min(MAX_GEMINI_API_KEYS - 1, Number(requestedIndex) || 0));
   const activeIndex = keys[safeRequestedIndex] ? safeRequestedIndex : Math.max(0, keys.findIndex(Boolean));
   const next = { keys, activeIndex };
   if (typeof window !== "undefined") {
@@ -41,5 +42,5 @@ export const countGeminiKeys = (pool: GeminiKeyPool): number => pool.keys.filter
 
 export const getVisibleGeminiKeySlots = (keys: string[]): number => {
   const lastUsedSlot = keys.reduce((last, value, index) => value ? index + 1 : last, 0);
-  return Math.min(3, Math.max(1, lastUsedSlot));
+  return Math.min(MAX_GEMINI_API_KEYS, Math.max(1, lastUsedSlot));
 };
