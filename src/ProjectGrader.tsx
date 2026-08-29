@@ -43,7 +43,7 @@ import {
   UserCheck,
   UserX
 } from 'lucide-react';
-import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
+import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 
 const APP_VERSION = "V6";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
@@ -3208,7 +3208,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               </div>
               {apiKey && <button type="button" onClick={() => setShowApiSettings(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"><X className="h-4 w-4" /></button>}
             </div>
-            <label className="mb-2 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Kho Gemini API key — tối đa 3 khóa</label>
+            <label className="mb-2 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Kho Gemini API key — tối đa 10 khóa</label>
             <div className="space-y-2">
               {Array.from({ length: visibleApiKeySlots }, (_, index) => index).map(index => (
                 <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
@@ -3220,8 +3220,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             </div>
             <div className="mt-2 flex items-center justify-between gap-3">
               <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa đang hoạt động. Hệ thống không tự chuyển khóa khi hết quota.</p>
-              {visibleApiKeySlots < 3 && (
-                <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(3, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
+              {visibleApiKeySlots < MAX_GEMINI_API_KEYS && (
+                <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(MAX_GEMINI_API_KEYS, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
               )}
             </div>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
