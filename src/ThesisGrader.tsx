@@ -40,7 +40,7 @@ import {
   Copy,
   Save
 } from 'lucide-react';
-import { countGeminiKeys, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
+import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -1140,6 +1140,7 @@ export default function App() {
   ]));
   const [apiKeyDrafts, setApiKeyDrafts] = useState(() => [...apiKeyPool.keys]);
   const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);
+  const [visibleApiKeySlots, setVisibleApiKeySlots] = useState(() => getVisibleGeminiKeySlots(apiKeyPool.keys));
   const apiKey = apiKeyPool.keys[apiKeyPool.activeIndex] || '';
   const apiKeyDraft = apiKeyDrafts[draftActiveApiKeyIndex] || '';
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
@@ -6427,6 +6428,7 @@ ${text.substring(0, 45000)}`;
   const openApiKeySettings = () => {
     setApiKeyDrafts([...apiKeyPool.keys]);
     setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
+    setVisibleApiKeySlots(getVisibleGeminiKeySlots(apiKeyPool.keys));
     setApiKeyStatus('');
     setShowApiKeyModal(true);
   };
@@ -6461,7 +6463,7 @@ ${text.substring(0, 45000)}`;
             <div className="p-5 flex flex-col gap-3">
               <label className="text-[10px] font-bold uppercase text-slate-500">Kho Gemini API key — tối đa 3 khóa</label>
               <div className="space-y-2">
-                {[0, 1, 2].map(index => (
+                {Array.from({ length: visibleApiKeySlots }, (_, index) => index).map(index => (
                   <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
                     <input type="radio" name="thesis-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => { setDraftActiveApiKeyIndex(index); setApiKeyStatus(''); }} />
                     <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
@@ -6469,7 +6471,12 @@ ${text.substring(0, 45000)}`;
                   </label>
                 ))}
               </div>
-              <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa hoạt động. Hệ thống chỉ kiểm tra và sử dụng khóa đang chọn, không tự luân phiên quota.</p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa hoạt động. Hệ thống chỉ kiểm tra và sử dụng khóa đang chọn, không tự luân phiên quota.</p>
+                {visibleApiKeySlots < 3 && (
+                  <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(3, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); setApiKeyStatus(''); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
+                )}
+              </div>
               <label className="text-[10px] font-bold uppercase text-slate-500 mt-1">Mô hình dùng để chấm</label>
               <select value={selectedGeminiModel} onChange={handleGeminiModelSelectionChange} disabled={isTestingApiKey} className={`w-full rounded-xl border px-4 py-3 text-xs font-bold outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`}>
                 {GEMINI_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label} — {option.detail}</option>)}
