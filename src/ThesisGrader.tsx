@@ -40,6 +40,7 @@ import {
   Copy,
   Save
 } from 'lucide-react';
+import { countGeminiKeys, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -1131,14 +1132,16 @@ const extractLegacyDocText = (arrayBuffer) => {
 };
 
 export default function App() {
-  const [apiKey, setApiKey] = useState(() => {
-    if (typeof window === 'undefined') return '';
-    try { return String(localStorage.getItem(GEMINI_API_KEY_STORAGE) || ''); } catch (_) { return ''; }
-  });
-  const [apiKeyDraft, setApiKeyDraft] = useState(() => {
-    if (typeof window === 'undefined') return '';
-    try { return String(localStorage.getItem(GEMINI_API_KEY_STORAGE) || ''); } catch (_) { return ''; }
-  });
+  const [apiKeyPool, setApiKeyPool] = useState(() => loadGeminiKeyPool([
+    (() => {
+      if (typeof window === 'undefined') return '';
+      try { return String(localStorage.getItem(GEMINI_API_KEY_STORAGE) || ''); } catch (_) { return ''; }
+    })()
+  ]));
+  const [apiKeyDrafts, setApiKeyDrafts] = useState(() => [...apiKeyPool.keys]);
+  const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);
+  const apiKey = apiKeyPool.keys[apiKeyPool.activeIndex] || '';
+  const apiKeyDraft = apiKeyDrafts[draftActiveApiKeyIndex] || '';
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [serverGeminiAvailable, setServerGeminiAvailable] = useState(false);
   const [serverGeminiChecked, setServerGeminiChecked] = useState(false);
@@ -3439,6 +3442,63 @@ Chỉ trả về JSON.`;
     }
   };
 
+  const reviewDuplicateUploads = (incomingFiles) => {
+    const accepted = [];
+    const replacementIds = new Set();
+    const comparisonPool = [...projects];
+
+    incomingFiles.forEach(file => {
+      const parsed = extractInfoFromFilename(file.name);
+      const incomingStudentId = cleanId(parsed.fallbackId || '');
+      const normalizedName = String(file.name || '').trim().toLowerCase();
+      const exactDuplicate = comparisonPool.find(project =>
+        String(project.fileName || '').trim().toLowerCase() === normalizedName
+        && Number(project.fileSize || 0) > 0
+        && Number(project.fileSize) === Number(file.size)
+        && (!incomingStudentId || cleanId(project.studentId || project.fallbackId || '') === incomingStudentId)
+      );
+
+      if (exactDuplicate) {
+        const addAgain = window.confirm(
+          `Tệp “${file.name}” trùng tên, dung lượng${incomingStudentId ? ' và MSSV' : ''} với bài đã nạp.\n\nBấm OK để vẫn nạp thêm; bấm Hủy để bỏ qua tệp trùng.`
+        );
+        if (!addAgain) return;
+      } else if (incomingStudentId) {
+        const sameStudent = comparisonPool.find(project =>
+          cleanId(project.studentId || project.fallbackId || '') === incomingStudentId
+        );
+        if (sameStudent) {
+          const replaceExisting = window.confirm(
+            `MSSV ${incomingStudentId} đã có tệp “${sameStudent.fileName || 'không rõ tên'}”, nhưng tệp mới có tên hoặc dung lượng khác.\n\nBấm OK để THAY THẾ bài cũ; bấm Hủy để chọn giữ cả hai hoặc bỏ qua.`
+          );
+          if (replaceExisting) {
+            replacementIds.add(sameStudent.id);
+            const oldIndex = comparisonPool.findIndex(item => item.id === sameStudent.id);
+            if (oldIndex >= 0) comparisonPool.splice(oldIndex, 1);
+          } else {
+            const keepBoth = window.confirm(
+              `Giữ cả hai tệp của MSSV ${incomingStudentId} để chấm như hai bài riêng?\n\nBấm OK để giữ cả hai; bấm Hủy để bỏ qua tệp mới.`
+            );
+            if (!keepBoth) return;
+          }
+        }
+      }
+
+      accepted.push(file);
+      comparisonPool.push({ id: `incoming-${accepted.length}`, fileName: file.name, fileSize: file.size, studentId: incomingStudentId, fallbackId: incomingStudentId });
+    });
+
+    if (replacementIds.size > 0) {
+      setProjects(previous => {
+        previous.filter(project => replacementIds.has(project.id)).forEach(project => {
+          if (String(project.fileUrl || '').startsWith('blob:')) URL.revokeObjectURL(project.fileUrl);
+        });
+        return previous.filter(project => !replacementIds.has(project.id));
+      });
+    }
+    return accepted;
+  };
+
   const handleBatchUpload = async (e) => {
     if (e?.dataTransfer) e.preventDefault();
     const inputElement = e?.target?.files ? e.target : null;
@@ -3468,7 +3528,9 @@ Chỉ trả về JSON.`;
       return true;
     });
 
-    if (validFiles.length === 0) {
+    const filesToAdd = reviewDuplicateUploads(validFiles);
+
+    if (filesToAdd.length === 0) {
       if (inputElement) inputElement.value = "";
       return;
     }
@@ -3480,7 +3542,7 @@ Chỉ trả về JSON.`;
        initialReviews[r.id] = "";
     });
 
-    validFiles.forEach((file, index) => {
+    filesToAdd.forEach((file, index) => {
       const { fallbackName, fallbackId } = extractInfoFromFilename(file.name);
       const ext = file.name.split('.').pop().toLowerCase();
       const isWord = ext === 'docx';
@@ -3512,6 +3574,7 @@ Chỉ trả về JSON.`;
       const customProject = {
         id: newId,
         fileName: file.name,
+        fileSize: file.size,
         studentName: finalName,
         studentId: finalId,
         thesisTitle: finalTitle,
@@ -6331,10 +6394,13 @@ ${text.substring(0, 45000)}`;
         throw new Error(`${response.status}: ${message}`);
       }
       localStorage.setItem(GEMINI_API_KEY_STORAGE, candidateKey);
-      setApiKey(candidateKey);
+      const nextPool = saveGeminiKeyPool(apiKeyDrafts, draftActiveApiKeyIndex);
+      setApiKeyPool(nextPool);
+      setApiKeyDrafts([...nextPool.keys]);
+      setDraftActiveApiKeyIndex(nextPool.activeIndex);
       activeGeminiModelRef.current = modelToTest;
       setActiveGeminiModel(modelToTest);
-      setApiKeyStatus(`Khóa hợp lệ với ${modelToTest} và đã được lưu riêng trên trình duyệt này.`);
+      setApiKeyStatus(`Khóa ${nextPool.activeIndex + 1} hợp lệ với ${modelToTest}. Đã lưu ${countGeminiKeys(nextPool)} khóa trên trình duyệt này.`);
       showToast('Đã kết nối Gemini API thành công.', 'success');
       window.setTimeout(() => setShowApiKeyModal(false), 500);
     } catch (error) {
@@ -6345,11 +6411,24 @@ ${text.substring(0, 45000)}`;
   };
 
   const handleRemoveApiKey = () => {
-    try { localStorage.removeItem(GEMINI_API_KEY_STORAGE); } catch (_) {}
-    setApiKey('');
-    setApiKeyDraft('');
-    setApiKeyStatus('Đã xóa khóa khỏi trình duyệt này.');
-    showToast('Đã xóa Gemini API key trên máy.', 'success');
+    const nextDrafts = apiKeyDrafts.map((value, index) => index === draftActiveApiKeyIndex ? '' : value);
+    const nextPool = saveGeminiKeyPool(nextDrafts, draftActiveApiKeyIndex);
+    setApiKeyPool(nextPool);
+    setApiKeyDrafts([...nextPool.keys]);
+    setDraftActiveApiKeyIndex(nextPool.activeIndex);
+    try {
+      if (nextPool.keys.some(Boolean)) localStorage.setItem(GEMINI_API_KEY_STORAGE, nextPool.keys[nextPool.activeIndex]);
+      else localStorage.removeItem(GEMINI_API_KEY_STORAGE);
+    } catch (_) {}
+    setApiKeyStatus(`Đã xóa khóa ${draftActiveApiKeyIndex + 1} khỏi trình duyệt này.`);
+    showToast('Đã xóa Gemini API key đang chọn trên máy.', 'success');
+  };
+
+  const openApiKeySettings = () => {
+    setApiKeyDrafts([...apiKeyPool.keys]);
+    setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
+    setApiKeyStatus('');
+    setShowApiKeyModal(true);
   };
 
 
@@ -6380,8 +6459,17 @@ ${text.substring(0, 45000)}`;
               {apiKey && <button type="button" onClick={() => setShowApiKeyModal(false)} className={`p-2 rounded-xl border cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-400' : 'bg-white border-slate-300 text-slate-600'}`}><X className="w-4 h-4" /></button>}
             </div>
             <div className="p-5 flex flex-col gap-3">
-              <label className="text-[10px] font-bold uppercase text-slate-500">Gemini API key</label>
-              <input type="password" autoComplete="off" value={apiKeyDraft} onChange={event => { setApiKeyDraft(event.target.value); setApiKeyStatus(''); }} onKeyDown={event => { if (event.key === 'Enter') handleTestAndSaveApiKey(); }} className={`w-full rounded-xl border px-4 py-3 font-mono text-xs outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`} placeholder="Dán khóa Gemini tại đây..." />
+              <label className="text-[10px] font-bold uppercase text-slate-500">Kho Gemini API key — tối đa 3 khóa</label>
+              <div className="space-y-2">
+                {[0, 1, 2].map(index => (
+                  <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
+                    <input type="radio" name="thesis-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => { setDraftActiveApiKeyIndex(index); setApiKeyStatus(''); }} />
+                    <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
+                    <input type="password" autoComplete="off" value={apiKeyDrafts[index] || ''} onChange={event => { setApiKeyDrafts(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value)); setApiKeyStatus(''); }} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-xs outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`} placeholder={`Dán API key tài khoản ${index + 1}`} />
+                  </label>
+                ))}
+              </div>
+              <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa hoạt động. Hệ thống chỉ kiểm tra và sử dụng khóa đang chọn, không tự luân phiên quota.</p>
               <label className="text-[10px] font-bold uppercase text-slate-500 mt-1">Mô hình dùng để chấm</label>
               <select value={selectedGeminiModel} onChange={handleGeminiModelSelectionChange} disabled={isTestingApiKey} className={`w-full rounded-xl border px-4 py-3 text-xs font-bold outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`}>
                 {GEMINI_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label} — {option.detail}</option>)}
@@ -6390,7 +6478,7 @@ ${text.substring(0, 45000)}`;
               <p className="text-[9px] text-slate-500">Không gửi khóa qua ChatGPT, email hoặc lưu trong file mã nguồn. Có thể tạo khóa tại Google AI Studio và xóa khỏi trình duyệt bất cứ lúc nào.</p>
             </div>
             <div className={`p-4 border-t flex justify-between gap-2 flex-wrap ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
-              <button type="button" onClick={handleRemoveApiKey} disabled={!apiKey && !apiKeyDraft} className="px-4 py-2 rounded-xl border border-rose-500/30 text-rose-500 text-xs font-bold disabled:opacity-30 cursor-pointer">Xóa khóa trên máy</button>
+              <button type="button" onClick={handleRemoveApiKey} disabled={!apiKeyDraft} className="px-4 py-2 rounded-xl border border-rose-500/30 text-rose-500 text-xs font-bold disabled:opacity-30 cursor-pointer">Xóa khóa đang chọn</button>
               <div className="flex gap-2">
                 {apiKey && <button type="button" onClick={() => setShowApiKeyModal(false)} className={`px-4 py-2 rounded-xl border text-xs font-bold cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}>Đóng</button>}
                 <button type="button" onClick={handleTestAndSaveApiKey} disabled={isTestingApiKey || !apiKeyDraft.trim()} className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-bold cursor-pointer flex items-center gap-1.5"><KeyRound className={`w-4 h-4 ${isTestingApiKey ? 'animate-pulse' : ''}`} />{isTestingApiKey ? 'Đang kiểm tra...' : 'Kiểm tra và lưu'}</button>
@@ -6428,7 +6516,7 @@ ${text.substring(0, 45000)}`;
           {serverGeminiAvailable ? (
             <div className="border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 bg-emerald-600/15 border-emerald-500/40 text-emerald-400" title="Khóa Gemini được AI Studio giữ an toàn phía máy chủ"><KeyRound className="w-4 h-4" />Gemini AI Studio</div>
           ) : (
-            <button type="button" onClick={() => { setApiKeyDraft(apiKey); setApiKeyStatus(''); setShowApiKeyModal(true); }} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer transition-all ${apiKey ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/25' : 'bg-amber-600/15 border-amber-500/50 text-amber-400 animate-pulse'}`} title="Cấu hình Gemini API key trên thiết bị này"><KeyRound className="w-4 h-4" />{apiKey ? 'Gemini đã kết nối' : 'Nhập khóa Gemini'}</button>
+            <button type="button" onClick={openApiKeySettings} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer transition-all ${apiKey ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/25' : 'bg-amber-600/15 border-amber-500/50 text-amber-400 animate-pulse'}`} title="Cấu hình tối đa 3 Gemini API key trên thiết bị này"><KeyRound className="w-4 h-4" />{apiKey ? `Khóa ${apiKeyPool.activeIndex + 1}/${countGeminiKeys(apiKeyPool)}` : 'Nhập khóa Gemini'}</button>
           )}
         </div>
       </header>
