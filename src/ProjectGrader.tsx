@@ -43,7 +43,7 @@ import {
   UserCheck,
   UserX
 } from 'lucide-react';
-import { countGeminiKeys, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
+import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, saveGeminiKeyPool } from './geminiKeyPool';
 
 const APP_VERSION = "V6";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
@@ -406,6 +406,7 @@ export default function App() {
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [draftApiKeys, setDraftApiKeys] = useState(() => [...apiKeyPool.keys]);
   const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);
+  const [visibleApiKeySlots, setVisibleApiKeySlots] = useState(() => getVisibleGeminiKeySlots(apiKeyPool.keys));
   const apiKey = apiKeyPool.keys[apiKeyPool.activeIndex] || '';
 
   const rubricFileInputRef = useRef(null);
@@ -483,6 +484,7 @@ export default function App() {
   const openApiSettings = () => {
     setDraftApiKeys([...apiKeyPool.keys]);
     setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
+    setVisibleApiKeySlots(getVisibleGeminiKeySlots(apiKeyPool.keys));
     setShowApiSettings(true);
   };
 
@@ -3208,7 +3210,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             </div>
             <label className="mb-2 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Kho Gemini API key — tối đa 3 khóa</label>
             <div className="space-y-2">
-              {[0, 1, 2].map(index => (
+              {Array.from({ length: visibleApiKeySlots }, (_, index) => index).map(index => (
                 <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
                   <input type="radio" name="project-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => setDraftActiveApiKeyIndex(index)} />
                   <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
@@ -3216,7 +3218,12 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 </label>
               ))}
             </div>
-            <p className="mt-2 text-[9px] text-slate-500">Chọn nút tròn để đặt khóa đang hoạt động. Hệ thống không tự chuyển khóa khi hết quota.</p>
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <p className="text-[9px] text-slate-500">Chọn nút tròn để đặt khóa đang hoạt động. Hệ thống không tự chuyển khóa khi hết quota.</p>
+              {visibleApiKeySlots < 3 && (
+                <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(3, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
+              )}
+            </div>
             <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Model chấm bài chính</label>
