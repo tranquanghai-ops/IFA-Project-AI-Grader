@@ -45,15 +45,17 @@ import {
 } from 'lucide-react';
 
 const APP_VERSION = "V6";
-const DEFAULT_GEMINI_MODEL = "gemini-3.7-flash";
-const DEFAULT_REVIEW_MODEL = "gemini-3.1-flash-lite";
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const DEFAULT_REVIEW_MODEL = "gemini-3-flash-preview";
 const GEMINI_MODEL_OPTIONS = [
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash – chấm chính xác" },
+  { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview – mặc định, tiết kiệm" },
+  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash – chấm lại / cân chỉnh kỹ" },
   { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash – tương thích" },
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash – tiết kiệm" }
 ];
 const REVIEW_MODEL_OPTIONS = [
-  { value: "gemini-3.1-flash-lite", label: "Flash Review – nhanh, tiết kiệm (mặc định)" },
+  { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview – mặc định" },
+  { value: "gemini-3.1-flash-lite", label: "Flash Lite – dự phòng, tải nhẹ" },
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash – kỹ hơn" },
   { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash – tốt nhất" }
 ];
