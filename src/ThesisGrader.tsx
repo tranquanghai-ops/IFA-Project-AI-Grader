@@ -943,6 +943,8 @@ const validateExtractedId = (rawId, fallback) => {
   return (fallback && fallback.trim() !== "") ? fallback.trim() : "Không Rõ";
 };
 
+const normalizeStudentId = (value) => String(value || '').trim().toUpperCase();
+
 const scoreToWords = (score) => {
   if (isNaN(score) || score === null || score === undefined) return "Không, Không";
   const rounded = Math.round(score * 10) / 10;
@@ -3480,13 +3482,13 @@ Chỉ trả về JSON.`;
 
     incomingFiles.forEach(file => {
       const parsed = extractInfoFromFilename(file.name);
-      const incomingStudentId = cleanId(parsed.fallbackId || '');
+      const incomingStudentId = normalizeStudentId(parsed.fallbackId || '');
       const normalizedName = String(file.name || '').trim().toLowerCase();
       const exactDuplicate = comparisonPool.find(project =>
         String(project.fileName || '').trim().toLowerCase() === normalizedName
         && Number(project.fileSize || 0) > 0
         && Number(project.fileSize) === Number(file.size)
-        && (!incomingStudentId || cleanId(project.studentId || project.fallbackId || '') === incomingStudentId)
+        && (!incomingStudentId || normalizeStudentId(project.studentId || project.fallbackId || '') === incomingStudentId)
       );
 
       if (exactDuplicate) {
@@ -3496,7 +3498,7 @@ Chỉ trả về JSON.`;
         if (!addAgain) return;
       } else if (incomingStudentId) {
         const sameStudent = comparisonPool.find(project =>
-          cleanId(project.studentId || project.fallbackId || '') === incomingStudentId
+          normalizeStudentId(project.studentId || project.fallbackId || '') === incomingStudentId
         );
         if (sameStudent) {
           const replaceExisting = window.confirm(
