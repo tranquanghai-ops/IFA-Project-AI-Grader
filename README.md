@@ -1,37 +1,56 @@
-# IFA Unified AI Grader — bản hợp nhất thử nghiệm
+# IFA Unified AI Grader V1
 
-Ứng dụng hợp nhất hai quy trình:
+Ứng dụng hợp nhất hai quy trình trong một địa chỉ:
 
-- **Chấm đồ án môn học / bài vẽ:** sử dụng mô-đun IFA Project AI Grader V6.
-- **Chấm thuyết minh DATN/DATH:** sử dụng mô-đun IFA Thesis AI Grader V3.2, giữ quy trình GVHD và phản biện.
+- **Chấm đồ án môn học / bài vẽ**
+- **Chấm thuyết minh DATN/DATH**, gồm GVHD, phản biện và góp ý sửa bài
 
-## Trạng thái nhánh
+## Model và API key
 
-Nhánh `codex/unified-v1` là bản thử nghiệm, chưa thay thế ứng dụng đang chạy trên `main`.
+- Mặc định dùng Gemini 3 Flash Preview cho tác vụ thông thường.
+- Gemini 3.6/3.7 vẫn có thể chọn thủ công khi cần.
+- Hỗ trợ tối đa 10 API key và chọn khóa đang hoạt động.
+- API key chỉ lưu trong trình duyệt, không nằm trong mã nguồn hoặc JSON.
 
-Ở màn hình đầu, giảng viên chọn loại nội dung cần chấm. Hai mô-đun được tải riêng để giảm thời gian mở trang. Khi đổi chế độ trong cùng phiên trình duyệt, dữ liệu đang nhập của mô-đun trước vẫn được giữ.
+## Thư viện rubric GitHub
 
-## An toàn dữ liệu
+Ứng dụng đọc danh sách rubric từ:
 
-- API key chỉ lưu cục bộ trong trình duyệt của giảng viên.
-- Hai chế độ vẫn dùng vùng lưu trữ và schema tiến trình riêng.
-- Không nhúng API key vào mã nguồn hoặc JSON xuất ra.
-- Repository hiện tại vẫn giữ nhánh `main` nguyên vẹn cho đến khi bản hợp nhất được kiểm tra đầy đủ.
-
-## Chạy thử
-
-```bash
-npm install
-npm run dev
+```
+public/rubrics/manifest.json
 ```
 
-## Kiểm tra biên dịch
+Các CSV được đặt theo chế độ:
+
+```
+public/rubrics/project/
+public/rubrics/thesis/
+```
+
+Để thêm rubric, tải CSV vào đúng thư mục và thêm mục tương ứng vào `manifest.json`. Sau lần triển khai tiếp theo, rubric tự xuất hiện trong danh sách lựa chọn ở Bước 1.
+
+CSV nên có bốn cột:
+
+```csv
+id,name,maxScore,desc
+```
+
+## Bảo mật và đồng bộ tài khoản
+
+GitHub Pages là ứng dụng tĩnh nên không được ghi API key vào mã hoặc tệp công khai. Phương án đồng bộ đa thiết bị dự kiến dùng Google Sign-In và vùng riêng `appDataFolder` của Google Drive:
+
+- Hồ sơ giảng viên và cài đặt thông thường được đồng bộ theo tài khoản.
+- API key chỉ được đồng bộ nếu giảng viên bật tùy chọn và khóa được mã hóa phía trình duyệt bằng mật khẩu bảo vệ riêng.
+- Không lưu PDF/Base64 trong hồ sơ đồng bộ.
+
+## Chạy và kiểm tra
 
 ```bash
 npm ci
+npm run dev
 npm run build
 ```
 
 ---
 
-Built by Trần Quang Hải — tranquanghai@tdtu.edu.vn
+IFA Unified AI Grader V1 — Built by Trần Quang Hải — tranquanghai@tdtu.edu.vn
