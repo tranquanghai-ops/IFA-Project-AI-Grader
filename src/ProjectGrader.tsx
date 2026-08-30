@@ -2062,6 +2062,7 @@ Không coi hình đẹp, photorealistic, render bằng phần mềm, văn phong 
       const payload = {
         contents: [{ parts: [{ text: `Bạn là trưởng bộ môn đang cân chỉnh tương quan điểm các bài đồ án môn học/bài vẽ tay đã được chấm độc lập. So sánh chất lượng chuyên môn theo đúng RUBRIC, không dựa vào tên sinh viên và không thay đổi điểm chỉ để tạo thứ hạng.
 NGUYÊN TẮC: (1) Bài tương đương giữ điểm tương đương. (2) Chỉ nâng/hạ khi có khác biệt rõ từ hồ sơ nhận xét và minh chứng. (3) Mỗi bài thay đổi tổng tối đa 0.7 điểm. (4) Không thưởng/phạt vì nghi vấn AI. (5) 9.5–10 là xuất sắc hiếm gặp; 9.0–9.4 rất tốt; 8.0–8.9 tốt nhưng còn hạn chế; 7.0–7.9 khá/đạt. (6) Lý do phải chỉ rõ bài mạnh/yếu hơn nhóm ở tiêu chí chuyên môn nào.
+HƯỚNG DẪN CHẤM BỔ SUNG CỦA GIẢNG VIÊN: ${gradingInstruction.trim() || "Không có hướng dẫn bổ sung."}
 RUBRIC: ${JSON.stringify(rubric)}
 HỒ SƠ CÁC BÀI: ${JSON.stringify(dossiers)}
 Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
