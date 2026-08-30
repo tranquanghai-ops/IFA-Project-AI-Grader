@@ -44,8 +44,9 @@ import {
   UserX
 } from 'lucide-react';
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
+import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
 
-const APP_VERSION = "V6";
+const APP_VERSION = "V1";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 const DEFAULT_REVIEW_MODEL = "gemini-3-flash-preview";
 const GEMINI_MODEL_OPTIONS = [
@@ -387,6 +388,10 @@ export default function App() {
   });
   
   const [rubric, setRubric] = useState(DEFAULT_RUBRIC);
+  const [gradingInstruction, setGradingInstruction] = useState('');
+  const [githubRubrics, setGithubRubrics] = useState([]);
+  const [selectedGithubRubric, setSelectedGithubRubric] = useState('');
+  const [loadingGithubRubric, setLoadingGithubRubric] = useState(false);
   const [currentStep, setCurrentStep] = useState(1); 
   const [sidebarFilter, setSidebarFilter] = useState('all'); 
   
@@ -462,6 +467,14 @@ export default function App() {
       localStorage.setItem('ifa-grader-theme', theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    let active = true;
+    loadRubricManifest('project')
+      .then(entries => { if (active) setGithubRubrics(entries); })
+      .catch(error => { if (active) showToast(`Chưa đọc được thư viện rubric GitHub: ${error.message}`, 'error'); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && !apiKey) setShowApiSettings(true);
@@ -1676,6 +1689,9 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     const feedbacksDirective = feedbacksMemory.length > 0
       ? `CÁC CHỈ THỊ / GÓP Ý CHẤM ĐIỂM BẮT BUỘC ĐÃ TIẾP THU TỪ GIẢNG VIÊN:\n${feedbacksMemory.map((f, idx) => `Chỉ thị ${idx + 1}: ${f}`).join('\n')}`
       : 'Không có chỉ thị đặc thù bổ sung.';
+    const lecturerInstructionDirective = String(gradingInstruction || '').trim()
+      ? `HƯỚNG DẪN CHẤM BỔ SUNG DO GIẢNG VIÊN NHẬP (PHẢI ÁP DỤNG CÙNG RUBRIC):\n${gradingInstruction.trim()}`
+      : 'Giảng viên không nhập hướng dẫn chấm bổ sung; chỉ áp dụng rubric và quy tắc hệ thống.';
 
     return `Bạn là Giảng viên chấm điểm độc lập môn Thiết kế / Mỹ thuật Công nghiệp IFA và là chuyên gia thẩm định nghệ thuật kỳ cựu.
     Hãy phân tích toàn bộ nội dung của tệp bài nộp bài tập / đồ án chuyên ngành thiết kế của sinh viên dưới đây.
@@ -1688,6 +1704,8 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     - Nếu môn học là Đồ án môn học / Thiết kế chuyên ngành / Đồ án tốt nghiệp: Tập trung cao vào tư duy nghiên cứu giải quyết công năng, ý tưởng độc đáo của giải pháp thiết kế (concept), độ chính xác kỹ thuật của bản vẽ 2D (mặt bằng, mặt đứng, mặt cắt), quy chuẩn dàn trang layout đồ án và tính thẩm mỹ diễn họa phối cảnh 3D.
 
     ${feedbacksDirective}
+
+    ${lecturerInstructionDirective}
 
     DỰA VÀO ĐÚNG CÁC TIÊU CHÍ RUBRIC TÙY CHỈNH DƯỚI ĐỂ ĐÁNH GIÁ CHẤM ĐIỂM (CỰC KỲ QUAN TRỌNG):
     ${rubricPrompt}
@@ -2322,61 +2340,33 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const text = event.target.result;
-        const lines = text.split(/\r?\n/);
-        if (lines.length < 2) {
-          showToast("Tệp tin không đúng định dạng cấu hình Rubric.", "error");
-          return;
-        }
-        
-        const importedRubrics = [];
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          
-          const cols = [];
-          let currentField = "";
-          let insideQuotes = false;
-          for (let j = 0; j < line.length; j++) {
-            const char = line[j];
-            if (char === '"') {
-              insideQuotes = !insideQuotes;
-            } else if (char === ',' && !insideQuotes) {
-              cols.push(currentField.trim());
-              currentField = "";
-            } else {
-              currentField += char;
-            }
-          }
-          cols.push(currentField.trim());
-
-          if (cols.length >= 3) {
-            const cleanId = cols[0].replace(/^"|"$/g, '').replace(/""/g, '"').trim() || `crit_${Date.now()}_${i}`;
-            const cleanName = cols[1].replace(/^"|"$/g, '').replace(/""/g, '"').trim();
-            const cleanMaxScore = parseFloat(cols[2].replace(/^"|"$/g, '').replace(/""/g, '"').trim()) || 1.0;
-            const cleanDesc = cols[3] ? cols[3].replace(/^"|"$/g, '').replace(/""/g, '"').trim() : "";
-            
-            importedRubrics.push({
-              id: cleanId,
-              name: cleanName,
-              maxScore: cleanMaxScore,
-              desc: cleanDesc
-            });
-          }
-        }
-
-        if (importedRubrics.length > 0) {
-          setRubric(importedRubrics);
-          showToast(`Nạp thành công ${importedRubrics.length} tiêu chí Rubric mới!`, "success");
-        } else {
-          showToast("Không tìm thấy cấu trúc Rubric hợp lệ trong file.", "error");
-        }
+        const importedRubrics = parseRubricCsv(event.target.result);
+        setRubric(importedRubrics);
+        showToast(`Nạp thành công ${importedRubrics.length} tiêu chí Rubric mới!`, "success");
       } catch (err) {
         showToast("Lỗi khi đọc file cấu trúc Rubric: " + err.message, "error");
       }
     };
     reader.readAsText(file, "UTF-8");
     e.target.value = "";
+  };
+
+  const handleLoadGithubRubric = async () => {
+    const entry = githubRubrics.find(item => item.id === selectedGithubRubric);
+    if (!entry) {
+      showToast('Hãy chọn một rubric trong thư viện GitHub.', 'error');
+      return;
+    }
+    setLoadingGithubRubric(true);
+    try {
+      const items = await loadRubricEntry(entry);
+      setRubric(items);
+      showToast(`Đã nạp “${entry.title}” từ GitHub với ${items.length} tiêu chí.`, 'success');
+    } catch (error) {
+      showToast(`Không thể nạp rubric GitHub: ${error.message}`, 'error');
+    } finally {
+      setLoadingGithubRubric(false);
+    }
   };
 
   const loadScript = (src) => new Promise((resolve, reject) => {
@@ -2660,7 +2650,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
   const handleExportProject = () => {
     const projectData = {
       appVersion: APP_VERSION,
-      rubric, globalSubject, globalSubjectCode, globalGroup,
+      rubric, gradingInstruction, globalSubject, globalSubjectCode, globalGroup,
       globalAcademicYear, globalSemester, globalExam, globalLecturer,
       globalGradingStrategy, sketches: projects, historyList, activeId, classList, gradingFeedbacks, calibrationReview
     };
@@ -2689,7 +2679,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
   const handleExportGradingStyle = () => {
     const projectData = {
       appVersion: APP_VERSION,
-      rubric, globalSubject, globalSubjectCode,
+      rubric, gradingInstruction, globalSubject, globalSubjectCode,
       gradingFeedbacks, globalGradingStrategy
     };
     const jsonString = JSON.stringify(projectData, null, 2);
@@ -2720,6 +2710,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       try {
         const importedData = JSON.parse(event.target.result);
         if (importedData.rubric) setRubric(importedData.rubric);
+        if (importedData.gradingInstruction !== undefined) setGradingInstruction(importedData.gradingInstruction);
         if (importedData.globalSubject !== undefined) setGlobalSubject(importedData.globalSubject);
         if (importedData.globalSubjectCode !== undefined) setGlobalSubjectCode(importedData.globalSubjectCode);
         if (importedData.globalGroup !== undefined) setGlobalGroup(importedData.globalGroup);
@@ -3254,8 +3245,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             <Sparkles className="w-6 h-6" />
           </div>
           <div>
-            <div className="flex items-center gap-2"><h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Project AI Grader</h1><span className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[9px] font-black text-indigo-400">{APP_VERSION}</span></div>
-            <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Hệ thống AI Thẩm định & Chấm điểm bài môn học khoa MTCN</p>
+            <div className="flex items-center gap-2"><h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Unified AI Grader</h1><span className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[9px] font-black text-indigo-400">{APP_VERSION}</span></div>
+            <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Chế độ: Chấm đồ án môn học / bài vẽ</p>
           </div>
         </div>
       </header>
@@ -3406,6 +3397,23 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               )}
             </div>
 
+            <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-500/25' : 'bg-cyan-50 border-cyan-200'}`}>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="min-w-[240px] flex-1">
+                  <label className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-cyan-500">Thư viện rubric CSV trên GitHub</label>
+                  <select value={selectedGithubRubric} onChange={event => setSelectedGithubRubric(event.target.value)} className={`w-full rounded-xl border px-3 py-2.5 text-xs font-bold outline-none ${theme === 'dark' ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`}>
+                    <option value="">Chọn rubric đã lưu trên GitHub...</option>
+                    {githubRubrics.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}
+                  </select>
+                  {selectedGithubRubric && <p className="mt-1 text-[9px] text-slate-500">{githubRubrics.find(entry => entry.id === selectedGithubRubric)?.description || ''}</p>}
+                </div>
+                <button type="button" onClick={handleLoadGithubRubric} disabled={!selectedGithubRubric || loadingGithubRubric} className="rounded-xl bg-cyan-600 px-4 py-2.5 text-xs font-black text-white hover:bg-cyan-500 disabled:opacity-40">
+                  {loadingGithubRubric ? 'Đang nạp...' : 'Nạp rubric đã chọn'}
+                </button>
+              </div>
+              <p className="mt-2 text-[9px] text-slate-500">Muốn thêm rubric mới, chỉ cần tải CSV vào thư mục <b>public/rubrics/project</b> và thêm một dòng khai báo trong <b>manifest.json</b>.</p>
+            </div>
+
             {/* SMART RUBRIC EXTRACTOR */}
             <div className={`flex flex-col gap-3 p-4 rounded-xl border ${theme === 'dark' ? 'bg-indigo-950/20 border-indigo-500/20' : 'bg-indigo-50/50 border-indigo-200'}`}>
                <div className="flex items-center justify-between flex-wrap gap-3">
@@ -3502,6 +3510,12 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   className={`w-full border rounded-lg px-3 py-2 text-xs font-semibold focus:outline-none ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`}
                 />
               </div>
+            </div>
+
+            <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900/80 border-indigo-500/25' : 'bg-white border-indigo-200'}`}>
+              <label className="mb-1.5 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-indigo-400"><FileText className="h-4 w-4" />Hướng dẫn chấm</label>
+              <textarea value={gradingInstruction} onChange={event => setGradingInstruction(event.target.value)} rows="4" placeholder="Nhập các yêu cầu bổ sung ngoài rubric. Nếu để trống, AI chỉ chấm theo rubric." className={`w-full rounded-xl border p-3 text-xs leading-5 outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-950 border-slate-700 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} />
+              <p className="mt-1 text-[9px] text-slate-500">AI phải áp dụng đồng thời rubric và hướng dẫn này khi chấm, chấm lại và cân chỉnh.</p>
             </div>
 
             {/* Rubric Cards List */}
@@ -5157,8 +5171,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
       {/* FOOTER */}
       <footer className={`mt-auto py-6 border-t flex flex-col items-center justify-center gap-1 z-10 transition-colors ${theme === 'dark' ? 'border-slate-800 bg-slate-950/60 text-slate-400' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>
-         <span className="text-[10px] font-bold tracking-wider uppercase font-sans">Built by: <span className={theme === 'dark' ? 'text-white' : 'text-slate-900'}>Trần Quang Hải</span> <span className="normal-case text-indigo-400">• {APP_VERSION}</span></span>
-         <span className="text-[9px] font-mono font-medium">Email: tranquanghai@tdtu.edu.vn</span>
+         <span className="text-[10px] font-bold tracking-wider uppercase font-sans">IFA Unified AI Grader · <span className="text-indigo-400">Phiên bản {APP_VERSION}</span></span>
+         <span className="text-[9px] font-mono font-medium">Chế độ: Chấm đồ án môn học · Built by Trần Quang Hải · tranquanghai@tdtu.edu.vn</span>
       </footer>
     </div>
   );
