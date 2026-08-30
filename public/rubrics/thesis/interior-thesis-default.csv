@@ -1,0 +1,13 @@
+id,name,maxScore,desc
+t1,Mở đầu,0.5,"Lý do chọn đề tài, mục tiêu, đối tượng, phạm vi và phương pháp nghiên cứu."
+t2,Chương 1 - Cơ sở lý luận,0.5,"Cơ sở lý luận có nguồn và liên hệ trực tiếp với đề tài."
+t3,Chương 1 - Tổng quan đề tài,0.5,"Tổng quan loại hình, bối cảnh và các trường hợp tham khảo."
+t4,Chương 2 - Hiện trạng,0.75,"Phân tích hiện trạng có dữ liệu, hình ảnh và nhận định."
+t5,Chương 2 - Người dùng và công năng,0.75,"Phân tích đối tượng sử dụng, nhu cầu và quan hệ công năng."
+t6,Chương 2 - Định hướng thiết kế,0.5,"Định hướng có căn cứ từ nghiên cứu và hiện trạng."
+t7,Chương 3 - Ý tưởng và giải pháp,1.0,"Ý tưởng chủ đạo, ngôn ngữ thiết kế và quá trình phát triển giải pháp."
+t8,Chương 4 - Không gian 1,1.25,"Thuyết minh giải pháp của không gian thứ nhất."
+t9,Chương 4 - Không gian 2,1.25,"Thuyết minh giải pháp của không gian thứ hai."
+t10,Chương 4 - Không gian 3,1.25,"Thuyết minh giải pháp của không gian thứ ba."
+t11,Chương 4 - Không gian 4,1.25,"Thuyết minh giải pháp của không gian thứ tư."
+t12,Đồ họa và trình bày thuyết minh,0.5,"Bố cục, hình ảnh, bảng biểu, chú thích và tính nhất quán của hồ sơ."
