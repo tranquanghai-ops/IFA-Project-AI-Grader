@@ -61,7 +61,7 @@ const GEMINI_MODEL_OPTIONS = [
   { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", detail: "Nhanh, phù hợp tác vụ đơn giản và tiết kiệm hạn mức" },
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash", detail: "Tương thích rộng" }
 ];
-const APP_VERSION = "V1.1";
+const APP_VERSION = "V1.2";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
