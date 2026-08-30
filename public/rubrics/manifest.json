@@ -1,0 +1,16 @@
+[
+  {
+    "id": "project-interior-default",
+    "mode": "project",
+    "title": "Đồ án Thiết kế Nội thất — mẫu 10 điểm",
+    "description": "Rubric khởi đầu cho đồ án môn học thiết kế nội thất.",
+    "file": "project/interior-default.csv"
+  },
+  {
+    "id": "thesis-interior-default",
+    "mode": "thesis",
+    "title": "Thuyết minh DATN/DATH Nội thất — mẫu 10 điểm",
+    "description": "Rubric khởi đầu chia theo Mở đầu, Chương 1–4 và đồ họa.",
+    "file": "thesis/interior-thesis-default.csv"
+  }
+]
