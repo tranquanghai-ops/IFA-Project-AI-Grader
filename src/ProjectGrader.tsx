@@ -41,26 +41,21 @@ import {
   HelpCircle,
   CheckSquare,
   UserCheck,
-  UserX
+  UserX,
+  Eye,
+  EyeOff,
+  Search,
+  Save,
+  KeyRound
 } from 'lucide-react';
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
+import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS, getGeminiModelLabel } from './shared/geminiModels';
+import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
+import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
+import { parseAiJson } from './shared/aiJson';
 
-const APP_VERSION = "V1.2";
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
-const DEFAULT_REVIEW_MODEL = "gemini-3-flash-preview";
-const GEMINI_MODEL_OPTIONS = [
-  { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview – mặc định, tiết kiệm" },
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash – chấm lại / cân chỉnh kỹ" },
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash – tương thích" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash – tiết kiệm" }
-];
-const REVIEW_MODEL_OPTIONS = [
-  { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview – mặc định" },
-  { value: "gemini-3.1-flash-lite", label: "Flash Lite – dự phòng, tải nhẹ" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash – kỹ hơn" },
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash – tốt nhất" }
-];
+const APP_VERSION = "V1.3";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -84,24 +79,6 @@ const DEFAULT_RUBRIC = [
   { id: 'visual_shading', name: 'Phối cảnh 3D & Diễn họa không gian', maxScore: 2.5, desc: 'Khả năng render/vẽ phác thảo phối cảnh góc nhìn rộng, xử lý nguồn sáng, chất cảm vật liệu và mức độ thẩm mỹ thị giác.' },
   { id: 'presentation_layout', name: 'Thuyết minh & Bố cục dàn trang (Layout)', maxScore: 2.0, desc: 'Bố cục thiết kế slide/portfolio, tính mạch lạc logic trong thuyết minh diễn giải phương án và tính thẩm mỹ chuyên nghiệp trong trình bày.' }
 ];
-
-const parseAiJson = (value) => {
-  const clean = String(value || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  if (!clean) throw new Error("AI trả về nội dung rỗng.");
-  const candidates = [clean];
-  const firstObject = clean.indexOf("{");
-  const lastObject = clean.lastIndexOf("}");
-  const firstArray = clean.indexOf("[");
-  const lastArray = clean.lastIndexOf("]");
-  if (firstObject >= 0 && lastObject > firstObject) candidates.push(clean.slice(firstObject, lastObject + 1));
-  if (firstArray >= 0 && lastArray > firstArray) candidates.push(clean.slice(firstArray, lastArray + 1));
-  for (const candidate of [...new Set(candidates)]) {
-    try { return JSON.parse(candidate); } catch (_) {
-      try { return JSON.parse(candidate.replace(/,\s*([}\]])/g, "$1")); } catch (_) { /* thử ứng viên tiếp theo */ }
-    }
-  }
-  throw new Error("AI trả sai định dạng JSON. Hệ thống đã giữ bài và không tạo kết quả điểm lỗi; hãy bấm Chấm lại bằng AI.");
-};
 
 const pdfItemsToLines = (items = []) => {
   const rows = [];
@@ -405,19 +382,22 @@ export default function App() {
   const [globalExam, setGlobalExam] = useState('Quá trình 1');
   const [globalLecturer, setGlobalLecturer] = useState('');
   const [globalGradingStrategy, setGlobalGradingStrategy] = useState(DEFAULT_GRADING_STRATEGY);
+  const [sendPdfExtractedText, setSendPdfExtractedText] = useState(false);
+  const [projectSortMode, setProjectSortMode] = useState('upload');
   const [apiKeyPool, setApiKeyPool] = useState(() => loadGeminiKeyPool([
     typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-api-key') || '' : ''
   ]));
   const [activeGeminiModel, setActiveGeminiModel] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-model') || DEFAULT_GEMINI_MODEL : DEFAULT_GEMINI_MODEL);
-  const [reviewGeminiModel, setReviewGeminiModel] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-review-model') || DEFAULT_REVIEW_MODEL : DEFAULT_REVIEW_MODEL);
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [draftApiKeys, setDraftApiKeys] = useState(() => [...apiKeyPool.keys]);
   const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);
   const [visibleApiKeySlots, setVisibleApiKeySlots] = useState(() => getVisibleGeminiKeySlots(apiKeyPool.keys));
+  const [revealedApiKeyIndexes, setRevealedApiKeyIndexes] = useState([]);
   const apiKey = apiKeyPool.keys[apiKeyPool.activeIndex] || '';
 
   const rubricFileInputRef = useRef(null);
   const projectFileInputRef = useRef(null); 
+  const singleProjectFileInputRef = useRef(null);
   const smartRubricInputRef = useRef(null);
   const classListInputRef = useRef(null);
 
@@ -434,6 +414,8 @@ export default function App() {
   const [isCalibratingScores, setIsCalibratingScores] = useState(false);
   const [calibrationReview, setCalibrationReview] = useState(null);
   const [showCalibrationReviewModal, setShowCalibrationReviewModal] = useState(false);
+  const [calibrationSelectedIds, setCalibrationSelectedIds] = useState([]);
+  const [showCalibrationSelection, setShowCalibrationSelection] = useState(false);
   const [scoreVersionProjectId, setScoreVersionProjectId] = useState(null);
   const [generatingRubricReviewKey, setGeneratingRubricReviewKey] = useState("");
 
@@ -446,6 +428,10 @@ export default function App() {
   const [aiSuspectDetailProject, setAiSuspectDetailProject] = useState(null);
   const [aiAuditInstruction, setAiAuditInstruction] = useState("");
   const [isRegeneratingAiAudit, setIsRegeneratingAiAudit] = useState(false);
+  const [irregularityProjectId, setIrregularityProjectId] = useState(null);
+  const [irregularityInstruction, setIrregularityInstruction] = useState("");
+  const [isCheckingIrregularities, setIsCheckingIrregularities] = useState(false);
+  const [regradeModelByProject, setRegradeModelByProject] = useState({});
   const [chartType, setChartType] = useState('column');
 
   const [toast, setToast] = useState({ message: "", type: "success" });
@@ -492,7 +478,6 @@ export default function App() {
     setApiKeyPool(nextPool);
     localStorage.setItem('ifa-project-gemini-api-key', nextPool.keys[nextPool.activeIndex]);
     localStorage.setItem('ifa-project-gemini-model', activeGeminiModel);
-    localStorage.setItem('ifa-project-review-model', reviewGeminiModel);
     setShowApiSettings(false);
     showToast(`Đã lưu ${countGeminiKeys(nextPool)} API key; đang dùng khóa ${nextPool.activeIndex + 1}.`, "success");
   };
@@ -501,6 +486,7 @@ export default function App() {
     setDraftApiKeys([...apiKeyPool.keys]);
     setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
     setVisibleApiKeySlots(getVisibleGeminiKeySlots(apiKeyPool.keys));
+    setRevealedApiKeyIndexes([]);
     setShowApiSettings(true);
   };
 
@@ -827,11 +813,14 @@ export default function App() {
     return strVal;
   };
 
-  const filteredProjects = projects.filter(p => {
+  const filteredProjects = sortProjects(projects.filter(p => {
     if (sidebarFilter === 'graded') return p.isGraded;
     if (sidebarFilter === 'pending') return !p.isGraded;
+    if (sidebarFilter === 'ai_suspected') return p.aiGeneratedStatus === 'suspected';
+    if (sidebarFilter === 'irregular') return Boolean(String(p.irregularitiesDetails || '').trim());
+    if (sidebarFilter === 'grading_error') return p.aiGradingFailed === true;
     return true;
-  });
+  }), projectSortMode);
 
   const updateProjectField = (id, field, value) => {
     setProjects(prev => prev.map(p => {
@@ -912,6 +901,7 @@ export default function App() {
       aiGeneratedDetails: data.aiGeneratedDetails ?? project.aiGeneratedDetails ?? "",
       aiDetectionReport: data.aiDetectionReport ?? project.aiDetectionReport ?? null,
       sourceId: data.scoreVersionSourceId || "",
+      gradingModel: data.gradingModel || project.gradingModel || "",
       note
     };
   };
@@ -1446,7 +1436,7 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
 
     try {
       const data = await fetchWithRetry(
-        `https://generativelanguage.googleapis.com/v1beta/models/${reviewGeminiModel}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
       );
 
@@ -1609,6 +1599,7 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
 
         const customProject = {
           id: newId,
+          uploadOrder: projects.length + index + 1,
           fileName: file.name,
           fileSize: file.size,
           studentName: finalName,
@@ -1761,7 +1752,8 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     }`;
   };
 
-  const performSingleGradingWithFeedbacks = async (project, feedbacksMemory = gradingFeedbacks) => {
+  const performSingleGradingWithFeedbacks = async (project, feedbacksMemory = gradingFeedbacks, modelOverride = "") => {
+    const gradingModel = modelOverride || activeGeminiModel || DEFAULT_GEMINI_MODEL;
     let fileData = project.base64;
     if (!fileData) throw new Error("Không tìm thấy dữ liệu tệp bài nộp.");
 
@@ -1902,7 +1894,7 @@ RUBRIC:\n${rubric.map(item => `- ${item.id}: ${item.name} (${item.maxScore}) –
           chunkParts.push({ text: `[Ảnh trang ${pageNumber}/${totalPages}]` });
           chunkParts.push({ inlineData: { mimeType: "image/jpeg", data: canvas.toDataURL("image/jpeg", PDF_JPEG_QUALITY).split(",")[1] } });
         }
-        if (textParts.length) chunkParts.splice(1, 0, { text: `VĂN BẢN TRÍCH XUẤT:\n${textParts.join("\n").slice(0, MAX_PDF_TEXT_CHARS)}` });
+        if (sendPdfExtractedText && textParts.length) chunkParts.splice(1, 0, { text: `VĂN BẢN TRÍCH XUẤT:\n${textParts.join("\n").slice(0, MAX_PDF_TEXT_CHARS)}` });
         const chunkPayload = {
           contents: [{ parts: chunkParts }],
           generationConfig: {
@@ -1924,7 +1916,7 @@ RUBRIC:\n${rubric.map(item => `- ${item.id}: ${item.name} (${item.maxScore}) –
             }
           }
         };
-        const chunkData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chunkPayload) });
+        const chunkData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${gradingModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chunkPayload) });
         const chunkText = chunkData.candidates?.[0]?.content?.parts?.[0]?.text;
         if (!chunkText) throw new Error(`AI không trả dữ liệu cho trang ${range.startPage}–${range.endPage}.`);
         chunkSummaries.push({ ...range, ...parseAiJson(chunkText) });
@@ -1975,7 +1967,7 @@ ${JSON.stringify(chunkSummaries)}` }];
       }
       const auditPayload = { contents: [{ parts: auditParts }], generationConfig: { temperature: 0.02, responseMimeType: "application/json", responseSchema: aiAuditSchema } };
       try {
-        const auditData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(auditPayload) });
+        const auditData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${gradingModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(auditPayload) });
         const auditText = auditData.candidates?.[0]?.content?.parts?.[0]?.text;
         if (auditText) dedicatedAiAudit = parseAiJson(auditText);
       } catch (auditError) {
@@ -2011,7 +2003,7 @@ ${JSON.stringify(chunkSummaries)}` }];
 
     recordGradingProgress(project.id, "Đang gửi hồ sơ minh chứng để AI tổng hợp điểm và nhận xét...", "final-request");
     const data = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${gradingModel}:generateContent?key=${apiKey}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
     );
 
@@ -2030,7 +2022,7 @@ Không coi hình đẹp, photorealistic, render bằng phần mềm, văn phong 
       else auditParts.push({ inlineData: { mimeType: project.mimeType || "image/jpeg", data: fileData } });
       const auditPayload = { contents: [{ parts: auditParts }], generationConfig: { temperature: 0.02, responseMimeType: "application/json", responseSchema: aiAuditSchema } };
       try {
-        const auditData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(auditPayload) });
+        const auditData = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${gradingModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(auditPayload) });
         const auditText = auditData.candidates?.[0]?.content?.parts?.[0]?.text;
         if (auditText) dedicatedAiAudit = parseAiJson(auditText);
       } catch (auditError) {
@@ -2054,6 +2046,7 @@ Không coi hình đẹp, photorealistic, render bằng phần mềm, văn phong 
       reviews: parsedData.nhanXetChiTiet || {},
       generalComment: parsedData.nhanXetChung || "",
       improvements: parsedData.huongCaiThien || [],
+      gradingModel,
       ocr: parsedData.thongTinSinhVienQuetDuoc || {},
       aiSuspect: dedicatedAiAudit ? { coNghiVan: auditSuspected, lyDoChiTiet: dedicatedAiAudit.lyDoChiTiet || "", report: { ...dedicatedAiAudit, diemTinCay: auditConfidence, coNghiVan: auditSuspected } } : (parsedData.nghiVanSuDungAI || { coNghiVan: false, lyDoChiTiet: "" })
     };
@@ -2063,8 +2056,64 @@ Không coi hình đẹp, photorealistic, render bằng phần mềm, văn phong 
     return performSingleGradingWithFeedbacks(project, gradingFeedbacks);
   };
 
+  const handleSaveProjectIrregularities = (projectId) => {
+    setProjects(previous => previous.map(project => project.id === projectId ? {
+      ...project,
+      irregularityGuidance: irregularityInstruction.trim(),
+      irregularityHistory: [...(project.irregularityHistory || []), {
+        type: 'manual_edit', text: project.irregularitiesDetails || '', guidance: irregularityInstruction.trim(), date: new Date().toISOString()
+      }].slice(-30)
+    } : project));
+    showToast("Đã lưu cảnh báo và hướng dẫn tìm bất thường.", "success");
+  };
+
+  const handleFindProjectIrregularities = async (projectId) => {
+    if (isCheckingIrregularities) return;
+    const project = projects.find(item => item.id === projectId);
+    if (!project) return;
+    setIsCheckingIrregularities(true);
+    try {
+      const existing = String(project.irregularitiesDetails || '').trim();
+      const extracted = [project.extractedText, ...(project.pdfPageTexts || []).map(item => item?.text || item)]
+        .filter(Boolean).join('\n').slice(0, MAX_PDF_TEXT_CHARS);
+      const parts = [{ text: `Rà soát BẤT THƯỜNG NỘI DUNG trong bài đồ án, tách hoàn toàn khỏi nghi vấn dùng AI.
+Cảnh báo đã có (không lặp lại): ${existing || 'Không có'}
+Hướng dẫn hiệu chỉnh của GV: ${irregularityInstruction || project.irregularityGuidance || 'Không có'}
+Chỉ nêu bất thường có bằng chứng cụ thể: mâu thuẫn nội bộ, lặp/sao chép nghiêm trọng, thiếu phần bắt buộc, dữ liệu phi lý hoặc sai lệch giữa các phần của chính bài.
+Bỏ qua hoàn toàn: chênh lệch số trang in và số trang thực tế của PDF, trang bìa/trang lót, cách đánh số trang, ngày trong lời cam đoan/lời tri ân và lỗi đánh máy nhỏ.
+Với địa giới hành chính hoặc dữ kiện có thể thay đổi, không khẳng định sai nếu không có nguồn hiện hành; ghi rõ cần GV kiểm tra. Nếu không có bất thường mới đủ căn cứ, trả chuỗi rỗng.
+${extracted ? `NỘI DUNG TRÍCH XUẤT:\n${extracted}` : ''}` }];
+      if (!extracted && project.base64) parts.push({ inlineData: { mimeType: project.mimeType || 'application/pdf', data: project.base64 } });
+      const payload = { contents: [{ parts }], generationConfig: { temperature: 0.12, responseMimeType: 'application/json', responseSchema: { type: 'OBJECT', properties: { chiTietMoi: { type: 'STRING' } }, required: ['chiTietMoi'] } } };
+      const data = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+      const result = parseAiJson(raw);
+      const finding = String(result.chiTietMoi || '').trim();
+      setProjects(previous => previous.map(item => item.id === projectId ? {
+        ...item,
+        irregularityGuidance: irregularityInstruction.trim(),
+        irregularityFindMoreResults: finding ? [...(item.irregularityFindMoreResults || []), { id: `irr-${Date.now()}`, text: finding, date: new Date().toISOString() }].slice(-10) : (item.irregularityFindMoreResults || []),
+        irregularityHistory: [...(item.irregularityHistory || []), { type: 'ai_review', text: finding, guidance: irregularityInstruction, date: new Date().toISOString() }].slice(-30)
+      } : item));
+      showToast(finding ? "AI đã đề xuất bất thường mới để GV duyệt." : "Không tìm thấy bất thường mới đủ căn cứ.", "success");
+    } catch (error) {
+      showToast(`Không thể rà soát bất thường: ${error?.message || 'Lỗi không xác định'}`, "error");
+    } finally {
+      setIsCheckingIrregularities(false);
+    }
+  };
+
+  const handleAcceptProjectIrregularity = (projectId, findingId) => setProjects(previous => previous.map(project => {
+    if (project.id !== projectId) return project;
+    const finding = (project.irregularityFindMoreResults || []).find(item => item.id === findingId);
+    return { ...project, irregularitiesDetails: [project.irregularitiesDetails, finding?.text].filter(Boolean).join('\n'), irregularityFindMoreResults: (project.irregularityFindMoreResults || []).filter(item => item.id !== findingId) };
+  }));
+
+  const handleDismissProjectIrregularity = (projectId, findingId) => setProjects(previous => previous.map(project => project.id === projectId ? { ...project, irregularityFindMoreResults: (project.irregularityFindMoreResults || []).filter(item => item.id !== findingId) } : project));
+
   const handleCalibrateGradedProjects = async () => {
-    const candidates = projects.filter(project => project.isGraded && !project.aiGradingFailed);
+    const allCandidates = projects.filter(project => project.isGraded && !project.aiGradingFailed);
+    const candidates = calibrationSelectedIds.length >= 2 ? allCandidates.filter(project => calibrationSelectedIds.includes(project.id)) : allCandidates;
     if (candidates.length < 2) { showToast("Cần ít nhất 2 bài đã được AI chấm để cân chỉnh.", "error"); return; }
     setIsCalibratingScores(true);
     try {
@@ -2077,11 +2126,12 @@ Không coi hình đẹp, photorealistic, render bằng phần mềm, văn phong 
         criterionReviews: rubric.reduce((result, item) => ({ ...result, [item.id]: String(project.reviews?.[item.id] || "").slice(0, 1800) }), {}),
         generalComment: String(project.generalComment || "").slice(0, 1600),
         improvements: project.improvements || [],
-        coverage: project.pdfTotalPages ? `${project.pdfTotalPages} trang; ${summarizePdfSections(project.pdfSections || [])}` : project.fileName
+        coverage: project.pdfTotalPages ? `${project.pdfTotalPages} trang; ${summarizePdfSections(project.pdfSections || [])}` : project.fileName,
+        lockedBenchmark: Boolean(project.lecturerAdjusted || (project.scoreVersions || []).some(version => version.editedByLecturer || version.type === 'manual_edit'))
       }));
       const payload = {
         contents: [{ parts: [{ text: `Bạn là trưởng bộ môn đang cân chỉnh tương quan điểm các bài đồ án môn học/bài vẽ tay đã được chấm độc lập. So sánh chất lượng chuyên môn theo đúng RUBRIC, không dựa vào tên sinh viên và không thay đổi điểm chỉ để tạo thứ hạng.
-NGUYÊN TẮC: (1) Bài tương đương giữ điểm tương đương. (2) Chỉ nâng/hạ khi có khác biệt rõ từ hồ sơ nhận xét và minh chứng. (3) Mỗi bài thay đổi tổng tối đa 0.7 điểm. (4) Không thưởng/phạt vì nghi vấn AI. (5) 9.5–10 là xuất sắc hiếm gặp; 9.0–9.4 rất tốt; 8.0–8.9 tốt nhưng còn hạn chế; 7.0–7.9 khá/đạt. (6) Lý do phải chỉ rõ bài mạnh/yếu hơn nhóm ở tiêu chí chuyên môn nào.
+NGUYÊN TẮC: (1) Bài tương đương giữ điểm tương đương. (2) Trước tiên so các bài cùng điểm để xác định bài tốt hơn; sau đó kiểm tra các nhóm điểm liền kề. (3) Chỉ nâng/hạ khi có khác biệt rõ từ hồ sơ nhận xét và minh chứng. (4) Mỗi bài thay đổi tổng tối đa 0.7 điểm. (5) Không thưởng/phạt vì nghi vấn AI. (6) Bài có lockedBenchmark=true là mốc do GV đã sửa/chấm thủ công: tuyệt đối giữ nguyên toàn bộ điểm, chỉ dùng để đối chiếu bài khác. (7) Lý do phải chỉ rõ bài mạnh/yếu hơn nhóm ở tiêu chí chuyên môn nào.
 HƯỚNG DẪN CHẤM BỔ SUNG CỦA GIẢNG VIÊN: ${gradingInstruction.trim() || "Không có hướng dẫn bổ sung."}
 RUBRIC: ${JSON.stringify(rubric)}
 HỒ SƠ CÁC BÀI: ${JSON.stringify(dossiers)}
@@ -2108,6 +2158,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         const comparison = comparisonMap.get(project.id);
         if (!comparison || !project.isGraded) return project;
         const before = { ...(project.grades || {}) };
+        const lockedBenchmark = Boolean(project.lecturerAdjusted || (project.scoreVersions || []).some(version => version.editedByLecturer || version.type === 'manual_edit'));
         const proposed = {};
         rubric.forEach(item => {
           const raw = Number(comparison.adjustedScores?.[item.id]);
@@ -2119,9 +2170,11 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         const scale = Math.abs(delta) > 0.7 ? 0.7 / Math.abs(delta) : 1;
         const after = {};
         rubric.forEach(item => { const current = Number(before[item.id] || 0); after[item.id] = Math.min(Number(item.maxScore), Math.max(0, Math.round((current + (proposed[item.id] - current) * scale) * 10) / 10)); });
+        if (lockedBenchmark) rubric.forEach(item => { after[item.id] = Number(before[item.id] || 0); });
         const afterTotal = Number(Object.values(after).reduce((sum, value) => sum + Number(value || 0), 0).toFixed(2));
         const changedCriteria = rubric.filter(item => Math.abs(Number(after[item.id] || 0) - Number(before[item.id] || 0)) >= 0.05).map(item => ({ id: item.id, name: item.name, before: Number(before[item.id] || 0), after: Number(after[item.id] || 0) }));
-        entries.push({ projectId: project.id, studentName: project.studentName || project.fileName, studentId: project.studentId || "", beforeTotal: Number(beforeTotal.toFixed(2)), afterTotal, changedCriteria, rationale: comparison.rationale || "Bài tương đương với nhóm nên giữ nguyên.", relativeLevel: comparison.relativeLevel || "", changed: changedCriteria.length > 0, undone: false });
+        entries.push({ projectId: project.id, studentName: project.studentName || project.fileName, studentId: project.studentId || "", beforeTotal: Number(beforeTotal.toFixed(2)), afterTotal, changedCriteria, rationale: lockedBenchmark ? "Bài mốc do GV đã sửa/chấm thủ công; hệ thống giữ nguyên." : (comparison.rationale || "Bài tương đương với nhóm nên giữ nguyên."), relativeLevel: comparison.relativeLevel || "", changed: changedCriteria.length > 0, lockedBenchmark, undone: false });
+        if (lockedBenchmark) return project;
         const calibratedData = {
           grades: changedCriteria.length ? after : before,
           scoreCalibrationNote: comparison.rationale || "",
@@ -2132,6 +2185,12 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         return appendScoreVersion(project, calibratedData, "calibration", `Cân chỉnh tương quan: ${comparison.rationale || "Giữ nguyên vì tương đương nhóm."}`);
       });
       setProjects(calibratedProjects);
+      entries.sort((left, right) => {
+        const leftDelta = left.afterTotal - left.beforeTotal;
+        const rightDelta = right.afterTotal - right.beforeTotal;
+        const rank = delta => delta > 0.04 ? 0 : delta < -0.04 ? 1 : 2;
+        return rank(leftDelta) - rank(rightDelta) || Math.abs(rightDelta) - Math.abs(leftDelta);
+      });
       const review = { id: calibrationId, time: new Date().toISOString(), entries };
       setCalibrationReview(review);
       setShowCalibrationReviewModal(true);
@@ -2198,6 +2257,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               aiGeneratedStatus: result.aiSuspect.coNghiVan ? 'suspected' : 'none',
               aiGeneratedDetails: result.aiSuspect.lyDoChiTiet || "",
               aiDetectionReport: result.aiSuspect.report || null,
+              gradingModel: result.gradingModel,
               classMatchStatus: classList && classList.length > 0 ? (classList.some(s => s.studentId === finalId) ? 'matched' : 'unmatched') : 'matched',
               classMatchNote: classList && classList.length > 0 && !classList.some(s => s.studentId === finalId) ? "Không tìm thấy trong danh sách tải lên" : "",
             }, "ai_grading", "Chấm tự động bằng AI");
@@ -2233,7 +2293,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     setGradingProjectId(null);
   };
 
-  const analyzeWithAI = async (overrideId = null) => {
+  const analyzeWithAI = async (overrideId = null, modelOverride = "") => {
     const targetId = typeof overrideId === 'string' ? overrideId : activeId;
     const targetProject = projects.find(p => p.id === targetId);
     if (!targetProject) return;
@@ -2246,7 +2306,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     startGradingProgress(targetId, "Bắt đầu phân tích bài nộp...");
 
     try {
-      const result = await performSingleGrading(targetProject);
+      const result = await performSingleGradingWithFeedbacks(targetProject, gradingFeedbacks, modelOverride);
       let finalName = validateExtractedName(result.ocr.tenSinhVien, targetProject.studentName);
       let finalId = validateExtractedId(result.ocr.mssv, targetProject.studentId);
 
@@ -2268,9 +2328,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             aiGeneratedStatus: result.aiSuspect.coNghiVan ? 'suspected' : 'none',
             aiGeneratedDetails: result.aiSuspect.lyDoChiTiet || "",
             aiDetectionReport: result.aiSuspect.report || null,
+            gradingModel: result.gradingModel,
             classMatchStatus: classList && classList.length > 0 ? (classList.some(s => s.studentId === finalId) ? 'matched' : 'unmatched') : 'matched',
             classMatchNote: classList && classList.length > 0 && !classList.some(s => s.studentId === finalId) ? "Không tìm thấy trong danh sách tải lên" : "",
-          }, "ai_grading", p.isGraded ? "Chấm lại bằng AI" : "Chấm lần đầu bằng AI");
+          }, p.isGraded ? "ai_regrade" : "ai_grading", p.isGraded ? "Chấm lại bằng AI" : "Chấm lần đầu bằng AI");
         }
         return p;
       }));
@@ -2468,7 +2529,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       };
 
       const data = await fetchWithRetry(
-        `https://generativelanguage.googleapis.com/v1beta/models/${reviewGeminiModel}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${activeGeminiModel}:generateContent?key=${apiKey}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
       );
 
@@ -2510,97 +2571,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const text = event.target.result;
-        
-        const parseCSV = (str) => {
-          const lines = [];
-          let row = [""];
-          let inQuotes = false;
-
-          for (let i = 0; i < str.length; i++) {
-            const char = str[i];
-            const nextChar = str[i + 1];
-
-            if (char === '"') {
-              if (inQuotes && nextChar === '"') {
-                row[row.length - 1] += '"';
-                i++; // Skip second quote
-              } else {
-                inQuotes = !inQuotes;
-              }
-            } else if (char === ',' && !inQuotes) {
-              row.push("");
-            } else if ((char === '\r' || char === '\n') && !inQuotes) {
-              if (char === '\r' && nextChar === '\n') {
-                i++; // Skip CRLF combo
-              }
-              lines.push(row);
-              row = [""];
-            } else {
-              row[row.length - 1] += char;
-            }
-          }
-          if (row.length > 1 || row[0] !== "") {
-            lines.push(row);
-          }
-          return lines;
-        };
-
-        const rawRows = parseCSV(text);
-        if (rawRows.length < 2) {
-          throw new Error("File CSV trống hoặc không đúng định dạng.");
-        }
-
-        const headers = rawRows[0].map(h => h.trim().toLowerCase());
-        
-        const emailIdx = headers.findIndex(h => h.includes('email') || h.includes('mail') || h.includes('thư điện tử'));
-        const usernameIdx = headers.findIndex(h => h.includes('username') || h.includes('tên đăng nhập') || h.includes('mã') || h.includes('mssv') || h.includes('student id') || h.includes('id'));
-        const firstNameIdx = headers.findIndex(h => h.includes('first name') || h.includes('tên') || h.includes('given name'));
-        const lastNameIdx = headers.findIndex(h => h.includes('last name') || h.includes('họ') || h.includes('surname') || h.includes('họ đệm'));
-        const fullNameIdx = headers.findIndex(h => h.includes('full name') || h.includes('họ và tên') || h.includes('họ tên') || h.includes('ho va ten'));
-
-        const parsedList = [];
-
-        for (let i = 1; i < rawRows.length; i++) {
-          const row = rawRows[i];
-          if (row.length === 0 || row.every(cell => cell.trim() === "")) continue;
-
-          let extractedId = "";
-          let extractedName = "";
-
-          let idSource = "";
-          if (usernameIdx !== -1 && row[usernameIdx]) {
-            idSource = row[usernameIdx].trim();
-          } else if (emailIdx !== -1 && row[emailIdx]) {
-            idSource = row[emailIdx].trim();
-          } else if (row[0]) {
-            idSource = row[0].trim();
-          }
-
-          if (idSource.includes('@')) {
-            idSource = idSource.split('@')[0];
-          }
-          
-          const idMatch = idSource.match(/[a-zA-Z0-9]+/);
-          extractedId = idMatch ? idMatch[0].toUpperCase() : idSource.toUpperCase();
-
-          if (fullNameIdx !== -1 && row[fullNameIdx]) {
-            extractedName = row[fullNameIdx].trim();
-          } else if (lastNameIdx !== -1 || firstNameIdx !== -1) {
-            const lastName = lastNameIdx !== -1 ? row[lastNameIdx].trim() : "";
-            const firstName = firstNameIdx !== -1 ? row[firstNameIdx].trim() : "";
-            extractedName = `${lastName} ${firstName}`.trim();
-          } else if (row[1]) {
-            extractedName = row[1].trim();
-          }
-
-          if (extractedId && extractedName) {
-            parsedList.push({
-              studentId: extractedId,
-              studentName: toTitleCase(extractedName)
-            });
-          }
-        }
+        const parsedList = extractStudentList(decodeStudentCsv(event.target.result)).map(student => ({ ...student, studentName: toTitleCase(student.studentName) }));
 
         if (parsedList.length > 0) {
           setClassList(parsedList);
@@ -2626,7 +2597,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         setIsExtractingClassList(false);
       }
     };
-    reader.readAsText(file, "UTF-8");
+    reader.readAsArrayBuffer(file);
     e.target.value = "";
   };
 
@@ -2673,7 +2644,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       appVersion: APP_VERSION,
       rubric, gradingInstruction, globalSubject, globalSubjectCode, globalGroup,
       globalAcademicYear, globalSemester, globalExam, globalLecturer,
-      globalGradingStrategy, sketches: projects, historyList, activeId, classList, gradingFeedbacks, calibrationReview
+      globalGradingStrategy, sendPdfExtractedText, projectSortMode, sketches: projects, historyList, activeId, classList, gradingFeedbacks, calibrationReview
     };
     const jsonString = JSON.stringify(projectData, null, 2);
     const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
@@ -2701,7 +2672,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     const projectData = {
       appVersion: APP_VERSION,
       rubric, gradingInstruction, globalSubject, globalSubjectCode,
-      gradingFeedbacks, globalGradingStrategy
+      gradingFeedbacks, globalGradingStrategy, sendPdfExtractedText
     };
     const jsonString = JSON.stringify(projectData, null, 2);
     const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
@@ -2740,6 +2711,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         if (importedData.globalExam !== undefined) setGlobalExam(importedData.globalExam);
         if (importedData.globalLecturer !== undefined) setGlobalLecturer(importedData.globalLecturer);
         if (importedData.globalGradingStrategy) setGlobalGradingStrategy(importedData.globalGradingStrategy);
+        if (importedData.sendPdfExtractedText !== undefined) setSendPdfExtractedText(importedData.sendPdfExtractedText === true);
+        if (importedData.projectSortMode) setProjectSortMode(importedData.projectSortMode);
         if (importedData.classList) setClassList(importedData.classList);
         if (importedData.gradingFeedbacks) setGradingFeedbacks(importedData.gradingFeedbacks);
         if (importedData.sketches) {
@@ -2974,7 +2947,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
           <div class="comment-box">
             ${project.generalComment || "Chưa có nhận xét tổng quát."}
           </div>
-          <div style="margin-top: 18px; text-align: right; font-size: 8px; color: #94a3b8;">IFA Project AI Grader ${APP_VERSION}</div>
+          <div style="margin-top: 18px; text-align: right; font-size: 8px; color: #94a3b8;">IFA AI Grader ${APP_VERSION}</div>
         </div>
       `;
     });
@@ -3226,7 +3199,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
                   <input type="radio" name="project-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => setDraftActiveApiKeyIndex(index)} />
                   <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
-                  <input type="password" autoComplete="off" value={draftApiKeys[index] || ''} onChange={event => setDraftApiKeys(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value))} placeholder={`Dán API key tài khoản ${index + 1}`} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-xs font-mono outline-none focus:border-indigo-500 ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`} />
+                  <input type={revealedApiKeyIndexes.includes(index) ? "text" : "password"} autoComplete="off" value={draftApiKeys[index] || ''} onChange={event => setDraftApiKeys(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value))} placeholder={`Dán API key tài khoản ${index + 1}`} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-xs font-mono outline-none focus:border-indigo-500 ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`} />
+                  <button type="button" onClick={(event) => { event.preventDefault(); setRevealedApiKeyIndexes(current => current.includes(index) ? current.filter(value => value !== index) : [...current, index]); }} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-500/10 hover:text-indigo-400" title={revealedApiKeyIndexes.includes(index) ? "Ẩn khóa" : "Hiện khóa"}>{revealedApiKeyIndexes.includes(index) ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button>
                 </label>
               ))}
             </div>
@@ -3236,20 +3210,14 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 <button type="button" onClick={() => { setVisibleApiKeySlots(current => Math.min(MAX_GEMINI_API_KEYS, current + 1)); setDraftActiveApiKeyIndex(visibleApiKeySlots); }} className="flex flex-shrink-0 items-center gap-1 rounded-lg border border-indigo-500/40 px-3 py-1.5 text-[10px] font-black text-indigo-400 hover:bg-indigo-500/10"><Plus className="h-3.5 w-3.5" />Thêm API key</button>
               )}
             </div>
-            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="mt-4 grid grid-cols-1 gap-4">
               <div>
-                <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Model chấm bài chính</label>
+                <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-indigo-400">Model Gemini dùng cho mọi tác vụ</label>
                 <select value={activeGeminiModel} onChange={(event) => setActiveGeminiModel(event.target.value)} className={`w-full rounded-xl border px-3 py-2.5 text-xs font-bold outline-none ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`}>
                   {GEMINI_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
               </div>
-              <div>
-                <label className="mb-1 block text-[10px] font-black uppercase tracking-wider text-emerald-400">Model Flash Review</label>
-                <select value={reviewGeminiModel} onChange={(event) => setReviewGeminiModel(event.target.value)} className={`w-full rounded-xl border px-3 py-2.5 text-xs font-bold outline-none ${theme === 'dark' ? 'border-slate-700 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-900'}`}>
-                  {REVIEW_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
-                <p className="mt-1 text-[9px] text-slate-500">Dùng cho OCR, phân tích rubric và danh sách sinh viên để giảm chi phí.</p>
-              </div>
+              <p className="text-[9px] text-slate-500">OCR, phân tích rubric, chấm bài, kiểm tra bất thường, chấm lại và cân chỉnh đều dùng model đang chọn. Mặc định là Gemini 3 Flash Preview.</p>
             </div>
             <div className="mt-6 flex justify-end gap-2">
               {apiKey && <button type="button" onClick={() => setShowApiSettings(false)} className="rounded-xl border border-slate-600 px-4 py-2 text-xs font-bold text-slate-400 hover:text-white">Hủy</button>}
@@ -3266,45 +3234,25 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             <Sparkles className="w-6 h-6" />
           </div>
           <div>
-            <div className="flex items-center gap-2"><h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Unified AI Grader</h1><span className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[9px] font-black text-indigo-400">{APP_VERSION}</span></div>
+            <div className="flex items-center gap-2"><h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA AI Grader</h1><span className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 text-[9px] font-black text-indigo-400">{APP_VERSION}</span></div>
             <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Chế độ: Chấm đồ án môn học / bài vẽ</p>
           </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <label className={`border rounded-xl px-3 py-2 flex items-center gap-2 ${theme === 'dark' ? 'bg-slate-900/80 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`} title="Model dùng chung cho OCR, chấm bài, chấm lại, bất thường và cân chỉnh">
+            <Sliders className="w-4 h-4 text-indigo-400" /><span className="hidden sm:inline text-[9px] font-black uppercase">Model</span>
+            <select value={activeGeminiModel} onChange={event => setActiveGeminiModel(event.target.value)} disabled={loading || batchLoading || isCalibratingScores} className="bg-transparent text-xs font-black outline-none cursor-pointer disabled:opacity-50">{GEMINI_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value} className="text-slate-900">{option.label}</option>)}</select>
+          </label>
+          <button type="button" onClick={openApiSettings} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 ${apiKey ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-400' : 'bg-amber-600/15 border-amber-500/50 text-amber-400 animate-pulse'}`}><KeyRound className="w-4 h-4" />{apiKey ? `Khóa ${apiKeyPool.activeIndex + 1}/${countGeminiKeys(apiKeyPool)}` : 'Nhập khóa Gemini'}</button>
+          <button type="button" onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-amber-400' : 'bg-white border-slate-300 text-indigo-600'}`}>{theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}<span className="hidden sm:inline">Giao diện</span></button>
         </div>
       </header>
 
       {/* MAIN CONTAINER */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6">
         
-        {/* THEME MODE TOGGLE */}
-        <div className="flex justify-end gap-2 mb-4 relative z-40">
-          <button
-            type="button"
-            onClick={openApiSettings}
-            className={`p-2.5 rounded-xl border transition-all flex items-center gap-2 text-xs font-black cursor-pointer shadow-lg active:scale-95 ${apiKey ? (theme === 'dark' ? 'bg-slate-950 border-emerald-700/60 text-emerald-400' : 'bg-white border-emerald-300 text-emerald-700') : 'bg-rose-950 border-rose-600 text-rose-300 animate-pulse'}`}
-            title="Cấu hình API và model Gemini"
-          >
-            <Sliders className="w-4 h-4" /> {apiKey ? `Khóa ${apiKeyPool.activeIndex + 1} · ${activeGeminiModel.replace('gemini-', '')}` : 'Nhập API key'}
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setTheme(prev => prev === 'dark' ? 'light' : 'dark');
-            }}
-            className={`p-2.5 rounded-xl border transition-all flex items-center gap-2 text-xs font-black cursor-pointer shadow-lg active:scale-95 ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-amber-400 hover:text-amber-300' : 'bg-white border-slate-300 text-indigo-600 hover:text-indigo-500'}`}
-            title={theme === 'dark' ? 'Chuyển sang Giao diện Sáng' : 'Chuyển sang Giao diện Tối'}
-          >
-            {theme === 'dark' ? (
-              <span className="flex items-center gap-1.5"><Sun className="w-4 h-4 text-amber-400" /> Giao diện Sáng</span>
-            ) : (
-              <span className="flex items-center gap-1.5"><Moon className="w-4 h-4 text-indigo-600" /> Giao diện Tối</span>
-            )}
-          </button>
-        </div>
-
         {/* STEP NAVIGATION WIZARD */}
-        <div className={`border rounded-2xl p-4 flex items-center justify-between gap-4 mb-6 shadow-sm overflow-x-auto ${theme === 'dark' ? 'bg-slate-950 border-slate-800' : 'bg-white border-slate-200'}`}>
+        <div className={`sticky top-[73px] z-40 border rounded-2xl p-4 flex items-center justify-between gap-4 mb-6 shadow-sm overflow-x-auto backdrop-blur ${theme === 'dark' ? 'bg-slate-950/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
           <div className="flex items-center gap-3 md:gap-4 lg:gap-8 min-w-max">
             <div onClick={() => setCurrentStep(1)} className={`flex items-center gap-2 cursor-pointer transition-all ${currentStep === 1 ? 'text-rose-400 font-bold' : (theme === 'dark' ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800')}`}>
               <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border ${currentStep === 1 ? 'bg-rose-500/20 border-rose-500 text-rose-400' : 'bg-slate-900 border-slate-800'}`}>1</span>
@@ -3432,7 +3380,6 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   {loadingGithubRubric ? 'Đang nạp...' : 'Nạp rubric đã chọn'}
                 </button>
               </div>
-              <p className="mt-2 text-[9px] text-slate-500">Muốn thêm rubric mới, chỉ cần tải CSV vào thư mục <b>public/rubrics/project</b> và thêm một dòng khai báo trong <b>manifest.json</b>.</p>
             </div>
 
             {/* SMART RUBRIC EXTRACTOR */}
@@ -3738,7 +3685,17 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   <button type="button" onClick={() => setSidebarFilter('all')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'all' ? 'bg-rose-500 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Tất cả ({projects.length})</button>
                   <button type="button" onClick={() => setSidebarFilter('pending')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'pending' ? 'bg-rose-500 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Chờ chấm ({projects.filter(p => !p.isGraded).length})</button>
                   <button type="button" onClick={() => setSidebarFilter('graded')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'graded' ? 'bg-rose-500 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Đã xong ({projects.filter(p => p.isGraded).length})</button>
+                  <button type="button" onClick={() => setSidebarFilter('ai_suspected')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'ai_suspected' ? 'bg-amber-500 text-slate-950' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Nghi vấn AI ({projects.filter(p => p.aiGeneratedStatus === 'suspected').length})</button>
+                  <button type="button" onClick={() => setSidebarFilter('irregular')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'irregular' ? 'bg-fuchsia-600 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Bất thường ({projects.filter(p => Boolean(String(p.irregularitiesDetails || '').trim())).length})</button>
+                  <button type="button" onClick={() => setSidebarFilter('grading_error')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'grading_error' ? 'bg-red-600 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>Chấm lỗi ({projects.filter(p => p.aiGradingFailed === true).length})</button>
                 </div>
+
+                <label className={`border py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center gap-1.5 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}>
+                  <span>Sắp xếp:</span>
+                  <select value={projectSortMode} onChange={event => setProjectSortMode(event.target.value)} className="bg-transparent outline-none cursor-pointer">
+                    {PROJECT_SORT_OPTIONS.map(option => <option key={option.value} value={option.value} className="text-slate-900">{option.label}</option>)}
+                  </select>
+                </label>
 
                 <div className="flex items-center gap-3 flex-wrap">
                   <label className={`font-bold py-1.5 px-3 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 border shadow-md transition-all ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-white border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-300'}`}>
@@ -3752,11 +3709,13 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                       {GRADING_STRATEGY_OPTIONS.map(option => <option key={option.value} value={option.value} className="text-slate-900">{option.label}</option>)}
                     </select>
                   </label>
+                  <button type="button" onClick={() => setSendPdfExtractedText(current => !current)} aria-pressed={sendPdfExtractedText} className={`border py-1.5 px-3 rounded-lg text-[10px] font-bold ${sendPdfExtractedText ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-400' : (theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-400' : 'bg-white border-slate-300 text-slate-600')}`} title="Bật để gửi cả text layer JavaScript trích xuất; tắt để AI chỉ nhận ảnh JPEG từng trang.">Text PDF: {sendPdfExtractedText ? 'Bật – ảnh + chữ' : 'Tắt – chỉ JPEG'}</button>
                   
                   <button type="button" onClick={handleBatchGradeAll} disabled={batchLoading || projects.length === 0} className="bg-gradient-to-r from-rose-600 to-amber-500 hover:from-rose-500 hover:to-amber-400 disabled:opacity-50 text-white font-black py-1.5 px-4 rounded-lg text-xs flex items-center gap-1.5 shadow-lg shadow-rose-950/40 transition-all uppercase tracking-wider cursor-pointer">
                     <Play className="w-3.5 h-3.5 fill-white" /> <span>Chấm tự động tất cả bằng AI</span>
                   </button>
-                  <button type="button" onClick={handleCalibrateGradedProjects} disabled={isCalibratingScores || batchLoading || projects.filter(project => project.isGraded && !project.aiGradingFailed).length < 2} className="bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-black py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 shadow-lg transition-all cursor-pointer">
+                  <button type="button" onClick={() => setShowCalibrationSelection(value => !value)} className={`border py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer ${showCalibrationSelection ? 'bg-violet-950 border-violet-400 text-violet-300' : theme === 'dark' ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}><CheckSquare className="w-3.5 h-3.5" />Chọn bài ({calibrationSelectedIds.length})</button>
+                  <button type="button" onClick={handleCalibrateGradedProjects} disabled={isCalibratingScores || batchLoading || (calibrationSelectedIds.length > 0 ? calibrationSelectedIds.length < 2 : projects.filter(project => project.isGraded && !project.aiGradingFailed).length < 2)} className="bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-black py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 shadow-lg transition-all cursor-pointer">
                     {isCalibratingScores ? <Sparkles className="w-3.5 h-3.5 animate-spin" /> : <Sliders className="w-3.5 h-3.5" />} <span>{isCalibratingScores ? "Đang cân chỉnh..." : "Cân chỉnh điểm"}</span>
                   </button>
                   <div className={`h-6 w-[1px] ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-300'}`}></div>
@@ -3797,6 +3756,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
                   return (
                     <div key={project.id} onClick={() => { handleSelectProject(project.id); if (hasGrades) { setIsGradedDrawerOpen(true); } }} className={`relative group/item rounded-2xl overflow-hidden border flex flex-col transition-all cursor-pointer select-none hover:shadow-xl ${theme === 'dark' ? 'bg-slate-900/40' : 'bg-slate-100/50'} ${isGradingThis ? 'border-indigo-500 ring-2 ring-indigo-500/50 animate-pulse' : (isActive ? 'border-rose-500 ring-2 ring-rose-500/20' : (theme === 'dark' ? 'border-slate-800 hover:border-slate-700' : 'border-slate-200 hover:border-slate-300'))}`}>
+                      {showCalibrationSelection && hasGrades && !project.aiGradingFailed && <label onClick={event => event.stopPropagation()} className="absolute z-30 top-2 right-2 bg-violet-950/95 border border-violet-400 text-white rounded-xl px-2 py-1.5 text-[9px] font-bold flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={calibrationSelectedIds.includes(project.id)} onChange={event => setCalibrationSelectedIds(previous => event.target.checked ? [...new Set([...previous, project.id])] : previous.filter(id => id !== project.id))} />So sánh</label>}
                       <div className="relative aspect-[4/3] w-full bg-slate-950 overflow-hidden flex flex-col items-center justify-center p-2 border-b border-slate-800 gap-2">
                         {isPDF ? (
                           project.thumbnailUrl ? (
@@ -3827,6 +3787,9 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                               <AlertTriangle className="w-3.5 h-3.5 text-white" /> <span>Nghi vấn AI</span>
                             </div>
                           )}
+                          <button type="button" onClick={(event) => { event.stopPropagation(); setIrregularityProjectId(project.id); setIrregularityInstruction(project.irregularityGuidance || ''); }} className={`${String(project.irregularitiesDetails || '').trim() ? 'bg-fuchsia-600 border-fuchsia-400' : 'bg-slate-900/90 border-slate-700'} hover:bg-fuchsia-500 text-white font-bold text-[9px] px-2 py-1.5 rounded-xl shadow-lg border flex items-center gap-1 cursor-pointer`} title="Xem, chỉnh sửa hoặc rà soát bất thường">
+                            <Search className="w-3 h-3" /> <span>{String(project.irregularitiesDetails || '').trim() ? 'Bất thường' : 'Tìm bất thường'}</span>
+                          </button>
                         </div>
 
                         {hasGrades ? (
@@ -4520,9 +4483,19 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             </div>
             
             <div className={`p-6 border-t flex justify-end gap-3 flex-wrap ${theme === 'dark' ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-slate-50'}`}>
+              <label className={`flex items-center gap-2 border rounded-xl px-3 py-2 text-[10px] font-bold ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}>
+                Model chấm lại
+                <select
+                  value={regradeModelByProject[activeProject.id] || activeGeminiModel}
+                  onChange={(event) => setRegradeModelByProject(previous => ({ ...previous, [activeProject.id]: event.target.value }))}
+                  className={`rounded-lg border px-2 py-1 text-[10px] ${theme === 'dark' ? 'bg-slate-950 border-slate-700 text-indigo-300' : 'bg-white border-slate-300 text-indigo-700'}`}
+                >
+                  {GEMINI_MODEL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </label>
               <button 
                 type="button" 
-                onClick={() => { setIsGradedDrawerOpen(false); analyzeWithAI(activeId); }} 
+                onClick={() => { setIsGradedDrawerOpen(false); analyzeWithAI(activeId, regradeModelByProject[activeProject.id] || activeGeminiModel); }} 
                 disabled={loading && activeId === activeProject.id} 
                 className={`border font-bold py-2.5 px-6 rounded-xl text-xs uppercase transition-all flex items-center gap-2 shadow-md disabled:opacity-50 cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}
               >
@@ -4543,6 +4516,25 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         </div>
       )}
 
+      {irregularityProjectId && (() => {
+        const project = projects.find(item => item.id === irregularityProjectId);
+        if (!project) return null;
+        return <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-sm z-[9999] flex items-center justify-center p-4">
+          <div className={`w-full max-w-3xl max-h-[88vh] overflow-hidden border rounded-3xl shadow-2xl flex flex-col ${theme === 'dark' ? 'bg-slate-950 border-fuchsia-500/30' : 'bg-white border-fuchsia-200'}`}>
+            <div className="p-5 border-b border-slate-800 flex items-start justify-between gap-4"><div><h3 className="text-base font-black text-fuchsia-400">Cảnh báo bất thường – {project.studentName}</h3><p className="text-[10px] text-slate-500 mt-1">GV có thể sửa nội dung, hướng dẫn AI và yêu cầu rà soát thêm lần nữa.</p></div><button type="button" onClick={() => setIrregularityProjectId(null)} className="p-2 rounded-xl bg-slate-900 text-slate-400 hover:text-white cursor-pointer"><X className="w-4 h-4" /></button></div>
+            <div className="p-5 overflow-y-auto flex flex-col gap-3">
+              <label className="text-[9px] font-bold uppercase text-fuchsia-400">Nội dung cảnh báo có thể chỉnh sửa</label>
+              <textarea value={project.irregularitiesDetails || ''} onChange={event => updateProjectField(project.id, 'irregularitiesDetails', event.target.value)} rows={7} className={`w-full rounded-xl border p-3 text-xs leading-relaxed outline-none focus:border-fuchsia-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} placeholder="Chưa có cảnh báo bất thường." />
+              <label className="text-[9px] font-bold uppercase text-indigo-400">Prompt hiệu chỉnh cách tìm bất thường</label>
+              <textarea value={irregularityInstruction} onChange={event => setIrregularityInstruction(event.target.value)} rows={3} className={`w-full rounded-xl border p-3 text-xs leading-relaxed outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} placeholder="Ví dụ: áp dụng địa giới hành chính Việt Nam hiện hành; bỏ qua lỗi đánh máy nhỏ..." />
+              {(project.irregularityFindMoreResults || []).map(finding => <div key={finding.id} className={`rounded-xl border p-3 ${theme === 'dark' ? 'bg-slate-900 border-fuchsia-500/30 text-slate-200' : 'bg-fuchsia-50 border-fuchsia-200 text-slate-800'}`}><p className="text-[10px] whitespace-pre-wrap leading-relaxed">{finding.text}</p><div className="flex justify-end gap-2 mt-2"><button type="button" onClick={() => handleDismissProjectIrregularity(project.id, finding.id)} className="rounded-lg bg-slate-700 text-white px-2 py-1 text-[9px] cursor-pointer">Bỏ qua</button><button type="button" onClick={() => handleAcceptProjectIrregularity(project.id, finding.id)} className="rounded-lg bg-emerald-600 text-white px-2 py-1 text-[9px] cursor-pointer">Thêm vào cảnh báo</button></div></div>)}
+              <p className="text-[9px] text-fuchsia-400">Hệ thống luôn bỏ qua chênh số trang in/PDF, trang bìa, cách đánh số trang, ngày ở phần mở đầu và lỗi đánh máy nhỏ.</p>
+            </div>
+            <div className="p-4 border-t border-slate-800 flex justify-end gap-2 flex-wrap"><button type="button" onClick={() => handleSaveProjectIrregularities(project.id)} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-4 py-2 rounded-xl text-xs cursor-pointer"><Save className="w-3.5 h-3.5 inline mr-1" />Lưu chỉnh sửa</button><button type="button" onClick={() => handleFindProjectIrregularities(project.id)} disabled={isCheckingIrregularities} className="bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-xl text-xs cursor-pointer"><Search className={`w-3.5 h-3.5 inline mr-1 ${isCheckingIrregularities ? 'animate-pulse' : ''}`} />{isCheckingIrregularities ? 'Đang rà soát...' : 'Tìm thêm'}</button></div>
+          </div>
+        </div>;
+      })()}
+
       {scoreVersionProjectId && (() => {
         const project = projects.find(item => item.id === scoreVersionProjectId);
         if (!project) return null;
@@ -4558,7 +4550,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 const totalDelta = previousVersion ? Number((Number(version.totalScore || 0) - Number(previousVersion.totalScore || 0)).toFixed(2)) : 0;
                 const highlightsChanges = ["calibration", "manual_edit"].includes(version.type) && Boolean(previousVersion);
                 return <div key={version.id} className={`border rounded-2xl p-4 ${selected ? 'border-emerald-500/60 bg-emerald-950/20' : 'border-slate-800 bg-slate-900/40'}`}>
-                  <div className="flex items-start justify-between gap-4"><div><div className="flex flex-wrap gap-2 items-center"><h4 className="text-sm font-black text-slate-200">{version.label || `Lần ${index + 1}`}</h4><span className="text-[9px] font-bold bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 rounded-lg px-2 py-1">{typeLabels[version.type] || version.type}</span>{selected && <span className="text-[9px] font-bold bg-emerald-600 text-white rounded-lg px-2 py-1">ĐIỂM CUỐI</span>}</div><p className="text-[10px] text-slate-500 mt-1">{version.createdAt ? new Date(version.createdAt).toLocaleString('vi-VN') : "Không rõ thời gian"}</p></div><div className={`text-right text-2xl font-black font-mono ${highlightsChanges && Math.abs(totalDelta) >= 0.05 ? 'text-red-500' : 'text-slate-200'}`}>{Number(version.totalScore || 0).toFixed(2)}{highlightsChanges && Math.abs(totalDelta) >= 0.05 && <span className="block text-[10px] text-red-400">{Number(previousVersion.totalScore || 0).toFixed(1)} → {Number(version.totalScore || 0).toFixed(1)} ({totalDelta > 0 ? '+' : ''}{totalDelta.toFixed(1)} điểm)</span>}</div></div>
+                  <div className="flex items-start justify-between gap-4"><div><div className="flex flex-wrap gap-2 items-center"><h4 className="text-sm font-black text-slate-200">{version.label || `Lần ${index + 1}`}</h4><span className="text-[9px] font-bold bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 rounded-lg px-2 py-1">{typeLabels[version.type] || version.type}</span>{version.gradingModel && <span className="text-[9px] font-bold bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 rounded-lg px-2 py-1">{getGeminiModelLabel(version.gradingModel)}</span>}{selected && <span className="text-[9px] font-bold bg-emerald-600 text-white rounded-lg px-2 py-1">ĐIỂM CUỐI</span>}</div><p className="text-[10px] text-slate-500 mt-1">{version.createdAt ? new Date(version.createdAt).toLocaleString('vi-VN') : "Không rõ thời gian"}</p></div><div className={`text-right text-2xl font-black font-mono ${highlightsChanges && Math.abs(totalDelta) >= 0.05 ? 'text-red-500' : 'text-slate-200'}`}>{Number(version.totalScore || 0).toFixed(2)}{highlightsChanges && Math.abs(totalDelta) >= 0.05 && <span className="block text-[10px] text-red-400">{Number(previousVersion.totalScore || 0).toFixed(1)} → {Number(version.totalScore || 0).toFixed(1)} ({totalDelta > 0 ? '+' : ''}{totalDelta.toFixed(1)} điểm)</span>}</div></div>
                   <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">{rubric.map(item => { const before = Number(previousVersion?.grades?.[item.id] || 0); const after = Number(version.grades?.[item.id] || 0); const delta = Number((after - before).toFixed(2)); const changed = highlightsChanges && Math.abs(delta) >= 0.05; return <div key={item.id} className={`flex justify-between gap-3 rounded-lg px-2.5 py-2 text-[10px] ${changed ? 'bg-red-950/30 border border-red-500/30' : 'bg-slate-950/60'}`}><span className={changed ? 'text-red-300 truncate' : 'text-slate-400 truncate'}>{item.name}</span><b className={changed ? 'text-red-400 font-mono' : 'text-slate-200 font-mono'}>{changed ? `${before.toFixed(1)} → ${after.toFixed(1)} (${delta > 0 ? '+' : ''}${delta.toFixed(1)})` : `${after.toFixed(1)} / ${Number(item.maxScore).toFixed(1)}`}</b></div>; })}</div>
                   {version.note && <p className="mt-3 text-[10px] leading-relaxed text-slate-300 border-l-2 border-indigo-500 pl-2">{version.note}</p>}
                   <div className="mt-3 flex items-center justify-between gap-3"><span className={`text-[9px] font-bold ${version.aiGeneratedStatus === 'suspected' ? 'text-amber-400' : 'text-slate-500'}`}>{version.aiGeneratedStatus === 'suspected' ? 'Có cảnh báo nghi vấn AI ở phiên bản này' : 'Không có cảnh báo AI đang hoạt động'}</span>{!selected && <button type="button" onClick={() => handleSelectScoreVersion(project.id, version.id)} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg px-3 py-2 text-[10px] cursor-pointer">Chọn làm điểm cuối</button>}</div>
@@ -4581,11 +4573,13 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             <div className="p-5 overflow-y-auto flex flex-col gap-3">
               {calibrationReview.entries.map(entry => {
                 const totalDelta = Number((entry.afterTotal - entry.beforeTotal).toFixed(2));
+                const directionClass = totalDelta > 0.04 ? 'text-emerald-400' : totalDelta < -0.04 ? 'text-red-400' : 'text-slate-300';
+                const panelClass = totalDelta > 0.04 ? 'border-emerald-500/50 bg-emerald-950/15' : totalDelta < -0.04 ? 'border-red-500/50 bg-red-950/15' : 'border-slate-800 bg-slate-900/40';
                 return (
-                <div key={entry.projectId} className={`border rounded-2xl p-4 ${entry.changed ? 'border-red-500/50 bg-red-950/15' : 'border-slate-800 bg-slate-900/40'}`}>
+                <div key={entry.projectId} className={`border rounded-2xl p-4 ${panelClass}`}>
                   <div className="flex items-start justify-between gap-4">
                     <div><h4 className="text-sm font-bold text-slate-200">{entry.studentName} <span className="text-[10px] text-slate-500 font-mono">{entry.studentId}</span></h4><p className="text-xs text-slate-300 mt-2 leading-relaxed">{entry.rationale}</p></div>
-                    <div className="text-right flex-shrink-0"><div className="text-xs font-black font-mono"><span className="text-slate-500">{entry.beforeTotal.toFixed(2)}</span><span className={`mx-2 ${entry.changed ? 'text-red-400' : 'text-violet-400'}`}>→</span><span className={entry.changed ? 'text-red-400' : 'text-slate-300'}>{entry.afterTotal.toFixed(2)}</span>{entry.changed && <span className="ml-1.5 text-red-400">({totalDelta > 0 ? '+' : ''}{totalDelta.toFixed(1)} điểm)</span>}</div><p className="text-[9px] text-slate-500 mt-1">{entry.relativeLevel}</p></div>
+                    <div className="text-right flex-shrink-0"><div className="text-xs font-black font-mono"><span className="text-slate-500">{entry.beforeTotal.toFixed(2)}</span><span className={`mx-2 ${directionClass}`}>→</span><span className={directionClass}>{entry.afterTotal.toFixed(2)}</span>{entry.changed && <span className={`ml-1.5 ${directionClass}`}>({totalDelta > 0 ? '+' : ''}{totalDelta.toFixed(1)} điểm)</span>}</div><p className="text-[9px] text-slate-500 mt-1">{entry.lockedBenchmark ? 'Mốc GV — giữ nguyên' : entry.relativeLevel}</p></div>
                   </div>
                   {entry.changedCriteria.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{entry.changedCriteria.map(item => { const delta = Number((item.after - item.before).toFixed(2)); return <span key={item.id} className="bg-red-950/30 border border-red-500/40 rounded-lg px-2 py-1 text-[9px] text-red-300">{item.name}: {item.before.toFixed(1)} → {item.after.toFixed(1)} ({delta > 0 ? '+' : ''}{delta.toFixed(1)} điểm)</span>; })}</div>}
                   {entry.changed && !entry.undone && <button type="button" onClick={() => handleUndoCalibration(entry.projectId, calibrationReview.id)} className="mt-3 bg-slate-800 hover:bg-slate-700 text-white font-bold px-3 py-2 rounded-lg text-[10px] flex items-center gap-1.5 cursor-pointer"><RotateCcw className="w-3.5 h-3.5" /> Không đồng ý – hoàn tác bài này</button>}
@@ -5204,7 +5198,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
       {/* FOOTER */}
       <footer className={`mt-auto py-6 border-t flex flex-col items-center justify-center gap-1 z-10 transition-colors ${theme === 'dark' ? 'border-slate-800 bg-slate-950/60 text-slate-400' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>
-         <span className="text-[10px] font-bold tracking-wider uppercase font-sans">IFA Unified AI Grader · <span className="text-indigo-400">Phiên bản {APP_VERSION}</span></span>
+         <span className="text-[10px] font-bold tracking-wider uppercase font-sans">IFA AI Grader · <span className="text-indigo-400">Phiên bản {APP_VERSION}</span></span>
          <span className="text-[9px] font-mono font-medium">Chế độ: Chấm đồ án môn học · Built by Trần Quang Hải · tranquanghai@tdtu.edu.vn</span>
       </footer>
     </div>

@@ -35,6 +35,7 @@ import {
   Maximize2,
   Clock,
   Eye,
+  EyeOff,
   Search,
   KeyRound,
   Copy,
@@ -42,26 +43,20 @@ import {
 } from 'lucide-react';
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest } from './rubricLibrary';
+import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS } from './shared/geminiModels';
+import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
 // trình duyệt. Không nhúng khóa vào mã nguồn và không đưa khóa vào JSON tiến trình.
 const GEMINI_API_KEY_STORAGE = "ifa-thesis-gemini-api-key";
 const GEMINI_MODEL_SELECTION_STORAGE = "ifa-thesis-gemini-model-selection";
-const GEMINI_MODEL_PRIMARY = "gemini-3-flash-preview";
+const GEMINI_MODEL_PRIMARY = DEFAULT_GEMINI_MODEL;
 const GEMINI_MODEL_FALLBACK_CHAIN = [
   "gemini-3-flash-preview",
   "gemini-2.5-flash"
 ];
-const GEMINI_MODEL_OPTIONS = [
-  { value: "auto", label: "Tự động tiết kiệm", detail: "Flash Preview → 2.5; không tự dùng 3.6/3.7" },
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash", detail: "Mới nhất, chất lượng cao" },
-  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash", detail: "Ổn định, cân bằng" },
-  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash", detail: "Ổn định, tải nhẹ hơn" },
-  { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", detail: "Nhanh, phù hợp tác vụ đơn giản và tiết kiệm hạn mức" },
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash", detail: "Tương thích rộng" }
-];
-const APP_VERSION = "V1.2";
+const APP_VERSION = "V1.3";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
@@ -1165,6 +1160,8 @@ export default function App() {
   const [loadingGithubRubric, setLoadingGithubRubric] = useState(false);
   const [currentStep, setCurrentStep] = useState(1); 
   const [sidebarFilter, setSidebarFilter] = useState('all'); 
+  const [projectSortMode, setProjectSortMode] = useState('upload');
+  const [revealedApiKeyIndexes, setRevealedApiKeyIndexes] = useState([]);
   
   const [globalLecturer, setGlobalLecturer] = useState('');
   const [lecturerRole, setLecturerRole] = useState('phan_bien');
@@ -2646,7 +2643,7 @@ ${project.extractedText ? `Văn bản trích xuất:\n${String(project.extracted
     return strVal;
   };
 
-  const filteredProjects = projects.filter(p => {
+  const filteredProjects = sortProjects(projects.filter(p => {
     if (sidebarFilter === 'graded') return p.isGraded;
     if (sidebarFilter === 'pending') return !p.isGraded;
     if (sidebarFilter === 'huong_dan') return (p.assignedLecturerRole || p.gradingRole || lecturerRole) === 'huong_dan';
@@ -2655,7 +2652,7 @@ ${project.extractedText ? `Văn bản trích xuất:\n${String(project.extracted
     if (sidebarFilter === 'irregular') return Boolean(String(p.irregularitiesDetails || "").trim());
     if (sidebarFilter === 'grading_error') return p.aiGradingFailed === true || Boolean(p.aiPartialWarning) || Boolean(p.aiEvidenceWarning);
     return true;
-  });
+  }), projectSortMode);
   const hasDualRoleClassLists = (classListsByRole.huong_dan || []).length > 0 && (classListsByRole.phan_bien || []).length > 0;
   const roleProjectCount = role => projects.filter(project => (project.assignedLecturerRole || project.gradingRole || lecturerRole) === role).length;
   const batchFailedProjectsCount = projects.filter(project => project.aiGradingFailed === true).length;
@@ -3606,6 +3603,7 @@ Chỉ trả về JSON.`;
 
       const customProject = {
         id: newId,
+        uploadOrder: projects.length + index + 1,
         fileName: file.name,
         fileSize: file.size,
         studentName: finalName,
@@ -6461,6 +6459,7 @@ ${text.substring(0, 45000)}`;
     setApiKeyDrafts([...apiKeyPool.keys]);
     setDraftActiveApiKeyIndex(apiKeyPool.activeIndex);
     setVisibleApiKeySlots(getVisibleGeminiKeySlots(apiKeyPool.keys));
+    setRevealedApiKeyIndexes([]);
     setApiKeyStatus('');
     setShowApiKeyModal(true);
   };
@@ -6499,7 +6498,8 @@ ${text.substring(0, 45000)}`;
                   <label key={index} className={`flex items-center gap-3 rounded-xl border p-2 ${draftActiveApiKeyIndex === index ? 'border-indigo-500 bg-indigo-500/10' : (theme === 'dark' ? 'border-slate-700' : 'border-slate-300')}`}>
                     <input type="radio" name="thesis-active-api-key" checked={draftActiveApiKeyIndex === index} onChange={() => { setDraftActiveApiKeyIndex(index); setApiKeyStatus(''); }} />
                     <span className="w-14 text-[10px] font-black uppercase text-slate-500">Khóa {index + 1}</span>
-                    <input type="password" autoComplete="off" value={apiKeyDrafts[index] || ''} onChange={event => { setApiKeyDrafts(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value)); setApiKeyStatus(''); }} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-xs outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`} placeholder={`Dán API key tài khoản ${index + 1}`} />
+                    <input type={revealedApiKeyIndexes.includes(index) ? "text" : "password"} autoComplete="off" value={apiKeyDrafts[index] || ''} onChange={event => { setApiKeyDrafts(current => current.map((value, keyIndex) => keyIndex === index ? event.target.value : value)); setApiKeyStatus(''); }} className={`min-w-0 flex-1 rounded-lg border px-3 py-2 font-mono text-xs outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`} placeholder={`Dán API key tài khoản ${index + 1}`} />
+                    <button type="button" onClick={(event) => { event.preventDefault(); setRevealedApiKeyIndexes(current => current.includes(index) ? current.filter(value => value !== index) : [...current, index]); }} className="rounded-lg p-2 text-slate-400 hover:bg-indigo-500/10 hover:text-indigo-400" title={revealedApiKeyIndexes.includes(index) ? "Ẩn khóa" : "Hiện khóa"}>{revealedApiKeyIndexes.includes(index) ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button>
                   </label>
                 ))}
               </div>
@@ -6534,7 +6534,7 @@ ${text.substring(0, 45000)}`;
             <Sparkles className="w-6 h-6" />
           </div>
           <div>
-            <h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Unified AI Grader</h1>
+            <h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA AI Grader</h1>
             <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Chế độ: {lecturerRole === 'sua_bai' ? "Góp ý hoàn thiện thuyết minh DATN/DATH" : "Chấm thuyết minh DATN/DATH"}</p>
           </div>
         </div>
@@ -6555,34 +6555,16 @@ ${text.substring(0, 45000)}`;
           {serverGeminiAvailable ? (
             <div className="border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 bg-emerald-600/15 border-emerald-500/40 text-emerald-400" title="Khóa Gemini được AI Studio giữ an toàn phía máy chủ"><KeyRound className="w-4 h-4" />Gemini AI Studio</div>
           ) : (
-            <button type="button" onClick={openApiKeySettings} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer transition-all ${apiKey ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/25' : 'bg-amber-600/15 border-amber-500/50 text-amber-400 animate-pulse'}`} title="Cấu hình tối đa 3 Gemini API key trên thiết bị này"><KeyRound className="w-4 h-4" />{apiKey ? `Khóa ${apiKeyPool.activeIndex + 1}/${countGeminiKeys(apiKeyPool)}` : 'Nhập khóa Gemini'}</button>
+            <button type="button" onClick={openApiKeySettings} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 cursor-pointer transition-all ${apiKey ? 'bg-emerald-600/15 border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/25' : 'bg-amber-600/15 border-amber-500/50 text-amber-400 animate-pulse'}`} title="Cấu hình tối đa 10 Gemini API key trên thiết bị này"><KeyRound className="w-4 h-4" />{apiKey ? `Khóa ${apiKeyPool.activeIndex + 1}/${countGeminiKeys(apiKeyPool)}` : 'Nhập khóa Gemini'}</button>
           )}
+          <button type="button" onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')} className={`border px-3 py-2 rounded-xl text-xs font-black flex items-center gap-2 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-amber-400' : 'bg-white border-slate-300 text-indigo-600'}`}>{theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}<span className="hidden sm:inline">Giao diện</span></button>
         </div>
       </header>
 
       {/* MAIN CONTAINER */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 pb-12">
-        {/* THEME MODE TOGGLE */}
-        <div className="flex justify-end mb-4 relative z-40">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setTheme(prev => prev === 'dark' ? 'light' : 'dark');
-            }}
-            className={`p-2.5 rounded-xl border transition-all flex items-center gap-2 text-xs font-black cursor-pointer shadow-lg active:scale-95 ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-amber-400 hover:text-amber-300' : 'bg-white border-slate-300 text-indigo-600 hover:text-indigo-500'}`}
-          >
-            {theme === 'dark' ? (
-              <span className="flex items-center gap-1.5"><Sun className="w-4 h-4 text-amber-400" /> Giao diện Sáng</span>
-            ) : (
-              <span className="flex items-center gap-1.5"><Moon className="w-4 h-4 text-indigo-600" /> Giao diện Tối</span>
-            )}
-          </button>
-        </div>
-
         {/* STEP NAVIGATION WIZARD */}
-        <div className={`border rounded-2xl p-4 flex items-center justify-between gap-4 mb-6 shadow-sm overflow-x-auto ${theme === 'dark' ? 'bg-slate-950 border-slate-800' : 'bg-white border-slate-200'}`}>
+        <div className={`sticky top-[73px] z-40 border rounded-2xl p-4 flex items-center justify-between gap-4 mb-6 shadow-sm overflow-x-auto backdrop-blur ${theme === 'dark' ? 'bg-slate-950/95 border-slate-800' : 'bg-white/95 border-slate-200'}`}>
           <div className="flex items-center gap-3 md:gap-4 lg:gap-8 min-w-max">
             <div onClick={() => setCurrentStep(1)} className={`flex items-center gap-2 cursor-pointer transition-all ${currentStep === 1 ? 'text-rose-400 font-bold' : (theme === 'dark' ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-800')}`}>
               <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border ${currentStep === 1 ? 'bg-rose-500/20 border-rose-500 text-rose-400' : 'bg-slate-900 border-slate-800'}`}>1</span>
@@ -6762,7 +6744,6 @@ ${text.substring(0, 45000)}`;
                   </div>
                   <button type="button" onClick={handleLoadGithubRubric} disabled={!selectedGithubRubric || loadingGithubRubric} className="rounded-xl bg-cyan-600 px-4 py-2.5 text-xs font-black text-white hover:bg-cyan-500 disabled:opacity-40">{loadingGithubRubric ? 'Đang nạp...' : 'Nạp rubric đã chọn'}</button>
                 </div>
-                <p className="mt-2 text-[9px] text-slate-500">Muốn thêm rubric mới, tải CSV vào <b>public/rubrics/thesis</b> và khai báo trong <b>manifest.json</b>.</p>
               </div>
 
                <h3 className={`text-sm font-bold uppercase tracking-wide flex items-center justify-between mb-3 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
@@ -6893,6 +6874,13 @@ ${text.substring(0, 45000)}`;
                   {hasDualRoleClassLists && <button type="button" onClick={() => setSidebarFilter('huong_dan')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'huong_dan' ? 'bg-amber-500 text-slate-950' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>GVHD ({roleProjectCount('huong_dan')})</button>}
                   {hasDualRoleClassLists && <button type="button" onClick={() => setSidebarFilter('phan_bien')} className={`px-3 py-1.5 rounded transition-all cursor-pointer ${sidebarFilter === 'phan_bien' ? 'bg-indigo-500 text-white' : (theme === 'dark' ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}>GVPB ({roleProjectCount('phan_bien')})</button>}
                 </div>
+
+                <label className={`border py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center gap-1.5 ${theme === 'dark' ? 'bg-slate-900 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}>
+                  <span>Sắp xếp:</span>
+                  <select value={projectSortMode} onChange={event => setProjectSortMode(event.target.value)} className="bg-transparent outline-none cursor-pointer">
+                    {PROJECT_SORT_OPTIONS.map(option => <option key={option.value} value={option.value} className="text-slate-900">{option.label}</option>)}
+                  </select>
+                </label>
 
                 <div className="flex items-center gap-3 flex-wrap">
                   <label className={`border py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center gap-1.5 shadow-md ${theme === 'dark' ? 'bg-slate-900 border-amber-500/30 text-amber-300' : 'bg-white border-amber-300 text-amber-700'}`} title="Chỉ gán cho các bài tải lên sau khi chọn; bài đã có giữ nguyên vai trò riêng">
@@ -8117,7 +8105,7 @@ ${text.substring(0, 45000)}`;
 
       {/* FOOTER */}
       <footer className={`py-4 mt-auto border-t flex flex-col items-center justify-center gap-1 ${theme === 'dark' ? 'border-slate-800 text-slate-500' : 'border-slate-200 text-slate-500'}`}>
-        <p className="text-xs font-semibold">IFA Unified AI Grader · <span className="font-black text-indigo-400">Phiên bản {APP_VERSION}</span></p>
+        <p className="text-xs font-semibold">IFA AI Grader · <span className="font-black text-indigo-400">Phiên bản {APP_VERSION}</span></p>
         <p className="text-[10px] font-mono">Chế độ: Chấm thuyết minh DATN/DATH · Built by Trần Quang Hải · Model: <span className="font-black text-emerald-400">{activeGeminiModel}</span></p>
       </footer>
 

@@ -53,7 +53,7 @@ function ModePicker({ onSelect }: { onSelect: (mode: GradingMode) => void }) {
           <div className="mx-auto mb-4 grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-orange-400 to-pink-600 shadow-xl shadow-pink-950/40">
             <BookOpenCheck className="h-8 w-8" />
           </div>
-          <p className="text-xs font-black uppercase tracking-[0.32em] text-indigo-300">IFA Unified AI Grader</p>
+          <p className="text-xs font-black uppercase tracking-[0.32em] text-indigo-300">IFA AI Grader</p>
           <h1 className="mt-3 text-3xl font-black tracking-tight sm:text-5xl">Chọn nội dung cần chấm</h1>
           <p className="mx-auto mt-4 max-w-2xl text-sm leading-6 text-slate-400">
             Hai quy trình dùng chung một địa chỉ nhưng giữ riêng rubric, danh sách sinh viên,
@@ -75,7 +75,7 @@ function ModePicker({ onSelect }: { onSelect: (mode: GradingMode) => void }) {
               Dùng cho bài tập, đồ án môn học và bài vẽ. Một vai trò giảng viên, rubric linh hoạt theo môn.
             </p>
             <span className="mt-6 inline-flex rounded-full bg-cyan-400/10 px-3 py-1.5 text-xs font-bold text-cyan-300">
-              Mở IFA Project AI Grader
+              Mở chế độ Chấm đồ án
             </span>
           </button>
 
@@ -92,13 +92,13 @@ function ModePicker({ onSelect }: { onSelect: (mode: GradingMode) => void }) {
               Giữ đầy đủ cơ chế GVHD, phản biện, sửa bài, phát hiện nghi vấn AI và cảnh báo bất thường.
             </p>
             <span className="mt-6 inline-flex rounded-full bg-fuchsia-400/10 px-3 py-1.5 text-xs font-bold text-fuchsia-300">
-              Mở IFA Thesis AI Grader
+              Mở chế độ Chấm thuyết minh
             </span>
           </button>
         </div>
 
         <p className="mt-8 text-center text-[11px] font-semibold uppercase tracking-widest text-slate-600">
-          IFA Unified AI Grader · Phiên bản V1.2
+          IFA AI Grader · Phiên bản V1.3
         </p>
       </div>
     </main>
