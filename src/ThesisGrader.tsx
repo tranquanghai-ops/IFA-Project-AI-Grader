@@ -41,6 +41,7 @@ import {
   Save
 } from 'lucide-react';
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
+import { loadRubricEntry, loadRubricManifest } from './rubricLibrary';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -60,7 +61,7 @@ const GEMINI_MODEL_OPTIONS = [
   { value: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview", detail: "Nhanh, phù hợp tác vụ đơn giản và tiết kiệm hạn mức" },
   { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash", detail: "Tương thích rộng" }
 ];
-const APP_VERSION = "V3.2";
+const APP_VERSION = "V1";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
@@ -1157,6 +1158,9 @@ export default function App() {
   });
   
   const [rubric, setRubric] = useState(THESIS_RUBRIC);
+  const [githubRubrics, setGithubRubrics] = useState([]);
+  const [selectedGithubRubric, setSelectedGithubRubric] = useState('');
+  const [loadingGithubRubric, setLoadingGithubRubric] = useState(false);
   const [currentStep, setCurrentStep] = useState(1); 
   const [sidebarFilter, setSidebarFilter] = useState('all'); 
   
@@ -1258,6 +1262,14 @@ export default function App() {
       localStorage.setItem('ifa-grader-theme', theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    let active = true;
+    loadRubricManifest('thesis')
+      .then(entries => { if (active) setGithubRubrics(entries); })
+      .catch(error => { if (active) showToast(`Chưa đọc được thư viện rubric GitHub: ${error.message}`, 'error'); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     setImgScale(1.0);
@@ -2121,6 +2133,24 @@ ${malformedTextToRepair}` }] }],
     };
     reader.readAsText(file, "UTF-8");
     e.target.value = "";
+  };
+
+  const handleLoadGithubRubric = async () => {
+    const entry = githubRubrics.find(item => item.id === selectedGithubRubric);
+    if (!entry) {
+      showToast('Hãy chọn một rubric trong thư viện GitHub.', 'error');
+      return;
+    }
+    setLoadingGithubRubric(true);
+    try {
+      const items = await loadRubricEntry(entry);
+      setRubric(migrateLegacySpaceRubric(items));
+      showToast(`Đã nạp “${entry.title}” từ GitHub với ${items.length} tiêu chí.`, 'success');
+    } catch (error) {
+      showToast(`Không thể nạp rubric GitHub: ${error.message}`, 'error');
+    } finally {
+      setLoadingGithubRubric(false);
+    }
   };
 
   const handleVerifyStudentWorkClean = (projectId) => {
@@ -6502,8 +6532,8 @@ ${text.substring(0, 45000)}`;
             <Sparkles className="w-6 h-6" />
           </div>
           <div>
-            <h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Thesis AI Grader</h1>
-            <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>{lecturerRole === 'sua_bai' ? "Hệ thống AI góp ý hoàn thiện thuyết minh ĐATN/ĐATH" : "Hệ thống AI Thẩm định & Chấm điểm ĐATN/ĐATH"}</p>
+            <h1 className={`text-xl font-extrabold tracking-tight ${theme === 'dark' ? 'bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-slate-900'}`}>IFA Unified AI Grader</h1>
+            <p className={`text-xs font-medium font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Chế độ: {lecturerRole === 'sua_bai' ? "Góp ý hoàn thiện thuyết minh DATN/DATH" : "Chấm thuyết minh DATN/DATH"}</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -6718,6 +6748,21 @@ ${text.substring(0, 45000)}`;
 
             {/* RUBRIC MANAGEMENT SECTION */}
             <div className={`border-t pt-5 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
+              <div className={`mb-4 rounded-xl border p-4 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-500/25' : 'bg-cyan-50 border-cyan-200'}`}>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div className="min-w-[240px] flex-1">
+                    <label className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-cyan-500">Thư viện rubric CSV trên GitHub</label>
+                    <select value={selectedGithubRubric} onChange={event => setSelectedGithubRubric(event.target.value)} className={`w-full rounded-xl border px-3 py-2.5 text-xs font-bold outline-none ${theme === 'dark' ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-900'}`}>
+                      <option value="">Chọn rubric thuyết minh đã lưu...</option>
+                      {githubRubrics.map(entry => <option key={entry.id} value={entry.id}>{entry.title}</option>)}
+                    </select>
+                    {selectedGithubRubric && <p className="mt-1 text-[9px] text-slate-500">{githubRubrics.find(entry => entry.id === selectedGithubRubric)?.description || ''}</p>}
+                  </div>
+                  <button type="button" onClick={handleLoadGithubRubric} disabled={!selectedGithubRubric || loadingGithubRubric} className="rounded-xl bg-cyan-600 px-4 py-2.5 text-xs font-black text-white hover:bg-cyan-500 disabled:opacity-40">{loadingGithubRubric ? 'Đang nạp...' : 'Nạp rubric đã chọn'}</button>
+                </div>
+                <p className="mt-2 text-[9px] text-slate-500">Muốn thêm rubric mới, tải CSV vào <b>public/rubrics/thesis</b> và khai báo trong <b>manifest.json</b>.</p>
+              </div>
+
                <h3 className={`text-sm font-bold uppercase tracking-wide flex items-center justify-between mb-3 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
                  <span className="flex items-center gap-2"><BookOpen className="w-4 h-4 text-indigo-500" /> Thang điểm ĐATN / ĐATH (Rubric)</span>
                  <div className="flex items-center gap-2">
@@ -8070,8 +8115,8 @@ ${text.substring(0, 45000)}`;
 
       {/* FOOTER */}
       <footer className={`py-4 mt-auto border-t flex flex-col items-center justify-center gap-1 ${theme === 'dark' ? 'border-slate-800 text-slate-500' : 'border-slate-200 text-slate-500'}`}>
-        <p className="text-xs font-semibold">Built by: <span className="font-black text-rose-500">Trần Quang Hải</span></p>
-        <p className="text-[10px] font-mono">Hệ thống Đánh giá Đồ án Tốt nghiệp · <span className="font-black text-indigo-400">Phiên bản {APP_VERSION}</span> · Lựa chọn: <span className="font-black text-indigo-400">{GEMINI_MODEL_OPTIONS.find(option => option.value === selectedGeminiModel)?.label || selectedGeminiModel}</span> · Model thực tế: <span className="font-black text-emerald-400">{activeGeminiModel}</span></p>
+        <p className="text-xs font-semibold">IFA Unified AI Grader · <span className="font-black text-indigo-400">Phiên bản {APP_VERSION}</span></p>
+        <p className="text-[10px] font-mono">Chế độ: Chấm thuyết minh DATN/DATH · Built by Trần Quang Hải · Model: <span className="font-black text-emerald-400">{activeGeminiModel}</span></p>
       </footer>
 
       {/* HIDDEN INPUTS */}
