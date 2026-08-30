@@ -15,6 +15,7 @@ import {
   History, 
   ChevronRight, 
   ChevronLeft,
+  ChevronDown,
   Info,
   RotateCw,
   FolderOpen,
@@ -55,7 +56,7 @@ import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
 import { parseAiJson } from './shared/aiJson';
 
-const APP_VERSION = "V1.3";
+const APP_VERSION = "V1.4";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -416,6 +417,7 @@ export default function App() {
   const [showCalibrationReviewModal, setShowCalibrationReviewModal] = useState(false);
   const [calibrationSelectedIds, setCalibrationSelectedIds] = useState([]);
   const [showCalibrationSelection, setShowCalibrationSelection] = useState(false);
+  const [saveProgressMenuLocation, setSaveProgressMenuLocation] = useState('');
   const [scoreVersionProjectId, setScoreVersionProjectId] = useState(null);
   const [generatingRubricReviewKey, setGeneratingRubricReviewKey] = useState("");
 
@@ -438,6 +440,7 @@ export default function App() {
   
   const [gradingProjectId, setGradingProjectId] = useState(null);
   const stopBatchRef = useRef(false);
+  const activeRequestControllerRef = useRef(null);
   const pdfProcessingRef = useRef(new Set());
 
   const [classList, setClassList] = useState([]);
@@ -608,7 +611,8 @@ export default function App() {
     }
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const response = await fetch(url, options);
+        const signal = options?.signal || activeRequestControllerRef.current?.signal;
+        const response = await fetch(url, { ...options, signal });
         if (!response.ok) {
           const responseText = await response.text();
           const error = new Error(`Gemini API ${response.status}: ${responseText.slice(0, 350) || response.statusText}`);
@@ -617,13 +621,31 @@ export default function App() {
         }
         return await response.json();
       } catch (error) {
+        if (error?.name === 'AbortError' || activeRequestControllerRef.current?.signal?.aborted) throw error;
         const retryable = !error?.status || [408, 409, 425, 429].includes(error.status) || error.status >= 500;
         if (attempt === retries || !retryable) {
           throw error;
         }
-        await new Promise(resolve => setTimeout(resolve, Math.min(12000, backoffMs * Math.pow(2, attempt - 1))));
+        await new Promise((resolve, reject) => {
+          const signal = activeRequestControllerRef.current?.signal;
+          const timeout = setTimeout(resolve, Math.min(12000, backoffMs * Math.pow(2, attempt - 1)));
+          signal?.addEventListener('abort', () => { clearTimeout(timeout); reject(new DOMException('Đã dừng theo yêu cầu.', 'AbortError')); }, { once: true });
+        });
       }
     }
+  };
+
+  const handleStopGrading = () => {
+    stopBatchRef.current = true;
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = null;
+    if (gradingProjectId) failGradingProgress(gradingProjectId, "Đã dừng theo yêu cầu của giảng viên");
+    setLoading(false);
+    setBatchLoading(false);
+    setIsCalibratingScores(false);
+    setGradingProjectId(null);
+    setLoadingStep("Đã dừng theo yêu cầu.");
+    showToast("Đã dừng yêu cầu AI đang chạy.", "info");
   };
 
   useEffect(() => {
@@ -2116,6 +2138,8 @@ ${extracted ? `NỘI DUNG TRÍCH XUẤT:\n${extracted}` : ''}` }];
     const candidates = calibrationSelectedIds.length >= 2 ? allCandidates.filter(project => calibrationSelectedIds.includes(project.id)) : allCandidates;
     if (candidates.length < 2) { showToast("Cần ít nhất 2 bài đã được AI chấm để cân chỉnh.", "error"); return; }
     setIsCalibratingScores(true);
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = new AbortController();
     try {
       const scoreProps = {};
       rubric.forEach(item => { scoreProps[item.id] = { type: "NUMBER" }; });
@@ -2196,9 +2220,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       setShowCalibrationReviewModal(true);
       showToast(`Đã cân chỉnh ${candidates.length} bài; có thể hoàn tác từng bài.`, "success");
     } catch (error) {
+      if (error?.name === 'AbortError') return;
       setErrorMsg("Không thể cân chỉnh điểm: " + (error.message || "Lỗi không xác định"));
       showToast("Cân chỉnh điểm thất bại.", "error");
-    } finally { setIsCalibratingScores(false); }
+    } finally { activeRequestControllerRef.current = null; setIsCalibratingScores(false); }
   };
 
   const handleUndoCalibration = (projectId, calibrationId) => {
@@ -2220,6 +2245,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     }
 
     stopBatchRef.current = false;
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = new AbortController();
     setBatchLoading(true);
     setErrorMsg("");
 
@@ -2283,6 +2310,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
         ]);
         finishGradingProgress(current.id);
       } catch (err) {
+        if (err?.name === 'AbortError' || stopBatchRef.current) {
+          failGradingProgress(current.id, "Đã dừng theo yêu cầu của giảng viên");
+          break;
+        }
         console.warn(`Lỗi khi chấm tự động: ${err.message}`);
         failGradingProgress(current.id, `AI lỗi: ${err.message || "Không rõ nguyên nhân"}`);
         simulateStandardGrading(current.id);
@@ -2291,6 +2322,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     }
     setBatchLoading(false);
     setGradingProjectId(null);
+    activeRequestControllerRef.current = null;
   };
 
   const analyzeWithAI = async (overrideId = null, modelOverride = "") => {
@@ -2299,6 +2331,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     if (!targetProject) return;
     
     setActiveId(targetId);
+    activeRequestControllerRef.current?.abort();
+    activeRequestControllerRef.current = new AbortController();
     setLoading(true);
     setGradingProjectId(targetId);
     setErrorMsg("");
@@ -2354,10 +2388,15 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       finishGradingProgress(targetId);
 
     } catch (err) {
+      if (err?.name === 'AbortError') {
+        failGradingProgress(targetId, "Đã dừng theo yêu cầu của giảng viên");
+        return;
+      }
       failGradingProgress(targetId, `AI lỗi: ${err.message || "Không rõ nguyên nhân"}`);
       setErrorMsg("Hệ thống AI bận. Đã tự động kích hoạt chế độ tự chấm dự phòng.");
       simulateStandardGrading(targetId);
     } finally {
+      activeRequestControllerRef.current = null;
       setLoading(false);
       setGradingProjectId(null);
     }
@@ -3291,6 +3330,11 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               </div>
             </div>
 
+            <div className={`rounded-2xl border p-4 flex flex-wrap items-center justify-between gap-3 ${theme === 'dark' ? 'bg-cyan-950/20 border-cyan-500/25' : 'bg-cyan-50 border-cyan-200'}`}>
+              <div><div className="text-[10px] font-black uppercase tracking-wider text-cyan-500">Nạp dữ liệu JSON</div><p className="mt-1 text-[9px] text-slate-500">Nạp tiến trình hoặc cách chấm. File cách chấm không xóa các bài đang có.</p></div>
+              <button type="button" onClick={() => projectFileInputRef.current?.click()} className={`flex items-center gap-1.5 border font-bold px-4 py-2.5 rounded-xl text-xs cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-cyan-500/30 text-cyan-300 hover:bg-slate-800' : 'bg-white border-cyan-300 text-cyan-700 hover:bg-cyan-50'}`}><UploadCloud className="w-4 h-4" /> Nạp tiến trình / cách chấm JSON</button>
+            </div>
+
             {/* CLASS LIST UPLOADER CARD */}
             <div className={`flex flex-col gap-4 p-5 rounded-2xl border transition-all ${theme === 'dark' ? 'bg-emerald-950/10 border-emerald-500/20' : 'bg-emerald-50/40 border-emerald-200'}`}>
               <div className="flex items-start justify-between flex-wrap gap-4">
@@ -3480,12 +3524,6 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               </div>
             </div>
 
-            <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-slate-900/80 border-indigo-500/25' : 'bg-white border-indigo-200'}`}>
-              <label className="mb-1.5 flex items-center gap-2 text-xs font-black uppercase tracking-wider text-indigo-400"><FileText className="h-4 w-4" />Hướng dẫn chấm</label>
-              <textarea value={gradingInstruction} onChange={event => setGradingInstruction(event.target.value)} rows="4" placeholder="Nhập các yêu cầu bổ sung ngoài rubric. Nếu để trống, AI chỉ chấm theo rubric." className={`w-full rounded-xl border p-3 text-xs leading-5 outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-950 border-slate-700 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} />
-              <p className="mt-1 text-[9px] text-slate-500">AI phải áp dụng đồng thời rubric và hướng dẫn này khi chấm, chấm lại và cân chỉnh.</p>
-            </div>
-
             {/* Rubric Cards List */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {rubric.map((crit, index) => (
@@ -3538,6 +3576,12 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
               </div>
             </div>
 
+            <div className={`rounded-2xl border p-5 ${theme === 'dark' ? 'bg-indigo-950/15 border-indigo-500/25' : 'bg-indigo-50/50 border-indigo-200'}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-3"><div><h3 className={`text-sm font-black uppercase tracking-wider flex items-center gap-2 ${theme === 'dark' ? 'text-indigo-300' : 'text-indigo-700'}`}><FileText className="w-4 h-4" /> Hướng dẫn chấm</h3><p className={`text-[10px] mt-1 leading-relaxed ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>Thông tin bổ sung ngoài rubric. Để trống thì AI chỉ chấm theo rubric và nguyên tắc mặc định.</p></div><span className={`px-2.5 py-1 rounded-lg border text-[9px] font-black ${gradingInstruction.trim() ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500' : 'bg-slate-500/10 border-slate-500/20 text-slate-500'}`}>{gradingInstruction.trim() ? 'Đang áp dụng' : 'Chưa nhập'}</span></div>
+              <textarea value={gradingInstruction} onChange={event => setGradingInstruction(event.target.value)} rows="5" maxLength={12000} placeholder="Nhập các yêu cầu bổ sung ngoài rubric..." className={`w-full rounded-xl border p-3 text-xs leading-relaxed focus:outline-none focus:border-indigo-500 ${theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-200' : 'bg-white border-slate-300 text-slate-800'}`} />
+              <div className={`mt-1 text-right text-[9px] font-mono ${theme === 'dark' ? 'text-slate-500' : 'text-slate-400'}`}>{gradingInstruction.length.toLocaleString('vi-VN')} / 12.000 ký tự</div>
+            </div>
+
             {/* Bottom Actions and Imports */}
             <div className={`flex flex-wrap items-center justify-between gap-4 border-t pt-5 ${theme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="flex flex-col w-full gap-4">
@@ -3548,9 +3592,6 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     </button>
                     <button type="button" onClick={() => rubricFileInputRef.current && rubricFileInputRef.current.click()} className={`flex items-center gap-1.5 border font-medium px-4 py-2.5 rounded-xl text-xs transition-all shadow cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
                       <UploadCloud className="w-3.5 h-3.5 text-rose-400" /> <span>Nạp Rubric</span>
-                    </button>
-                    <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`flex items-center gap-1.5 border font-medium px-4 py-2.5 rounded-xl text-xs transition-all shadow cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
-                      <UploadCloud className="w-3.5 h-3.5 text-emerald-500" /> <span>Nạp dự án (.json)</span>
                     </button>
                   </div>
                   <button type="button" onClick={() => setCurrentStep(2)} className="bg-rose-500 hover:bg-rose-400 text-white font-bold py-2.5 px-6 rounded-xl text-xs flex items-center gap-1.5 transition-all shadow-lg cursor-pointer">
@@ -3585,7 +3626,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     </div>
                   </div>
                 </div>
-                {batchLoading && <button onClick={() => { stopBatchRef.current = true; }} className="bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-colors shadow-md shadow-rose-950/20 cursor-pointer flex-shrink-0">Dừng chấm</button>}
+                <button type="button" onClick={handleStopGrading} className="bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-colors shadow-md shadow-rose-950/20 cursor-pointer flex-shrink-0">Dừng ngay</button>
               </div>
             )}
 
@@ -3719,14 +3760,14 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     {isCalibratingScores ? <Sparkles className="w-3.5 h-3.5 animate-spin" /> : <Sliders className="w-3.5 h-3.5" />} <span>{isCalibratingScores ? "Đang cân chỉnh..." : "Cân chỉnh điểm"}</span>
                   </button>
                   <div className={`h-6 w-[1px] ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-300'}`}></div>
-                  <div className="relative group z-30">
-                    <button type="button" className={`border py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-md transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`} title="Tùy chọn lưu dữ liệu">
-                      <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /> <span>Lưu dữ liệu...</span>
+                  <div className="relative z-30">
+                    <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step2' ? '' : 'step2')} className={`border py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-md transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`} title="Bấm để chọn loại dữ liệu cần lưu">
+                      <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /> <span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                     </button>
-                    <div className={`absolute right-0 top-full mt-1 hidden group-hover:flex flex-col rounded-lg shadow-xl border overflow-hidden whitespace-nowrap min-w-max ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                    {saveProgressMenuLocation === 'step2' && <div className={`absolute right-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
                       <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
                       <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
-                    </div>
+                    </div>}
                   </div>
                   <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-md transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`} title="Nạp lại tiến trình">
                     <UploadCloud className="w-3.5 h-3.5 text-emerald-500" /> <span>Nạp tiến trình (.json)</span>
@@ -3787,9 +3828,6 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                               <AlertTriangle className="w-3.5 h-3.5 text-white" /> <span>Nghi vấn AI</span>
                             </div>
                           )}
-                          <button type="button" onClick={(event) => { event.stopPropagation(); setIrregularityProjectId(project.id); setIrregularityInstruction(project.irregularityGuidance || ''); }} className={`${String(project.irregularitiesDetails || '').trim() ? 'bg-fuchsia-600 border-fuchsia-400' : 'bg-slate-900/90 border-slate-700'} hover:bg-fuchsia-500 text-white font-bold text-[9px] px-2 py-1.5 rounded-xl shadow-lg border flex items-center gap-1 cursor-pointer`} title="Xem, chỉnh sửa hoặc rà soát bất thường">
-                            <Search className="w-3 h-3" /> <span>{String(project.irregularitiesDetails || '').trim() ? 'Bất thường' : 'Tìm bất thường'}</span>
-                          </button>
                         </div>
 
                         {hasGrades ? (
@@ -3967,14 +4005,14 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 <p className={`text-xs mt-1 font-mono ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Danh sách thống kê chi tiết các bài đã chấm</p>
               </div>
               <div className="flex items-center gap-2.5 flex-wrap">
-                <div className="relative group z-30">
-                  <button type="button" className={`border font-semibold py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`} title="Tùy chọn lưu dữ liệu">
-                    <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu dữ liệu...</span>
+                <div className="relative z-30">
+                  <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step3' ? '' : 'step3')} className={`border font-semibold py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`} title="Bấm để chọn loại dữ liệu cần lưu">
+                    <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
-                  <div className={`absolute right-0 top-full mt-1 hidden group-hover:flex flex-col rounded-lg shadow-xl border overflow-hidden whitespace-nowrap min-w-max ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                  {saveProgressMenuLocation === 'step3' && <div className={`absolute right-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
                     <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
                     <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
-                  </div>
+                  </div>}
                 </div>
                 <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border font-semibold py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-300 text-emerald-500 hover:bg-slate-50'}`} title="Nạp tiến trình từ tệp JSON"><UploadCloud className="w-3.5 h-3.5 text-emerald-500" /><span>Nạp tiến trình</span></button>
                 <div className={`text-xs font-semibold border px-3 py-1.5 rounded-lg font-mono font-bold ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>Kết quả cuối: {projects.filter(project => project.isGraded).length} bài</div>
@@ -4060,14 +4098,14 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 <p className={`text-xs mt-1 ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>Xuất tệp CSV tương thích chuẩn quản lý đào tạo hoặc in hàng loạt phiếu đánh giá chi tiết của Giảng viên.</p>
               </div>
               <div className="flex gap-2 flex-wrap items-center">
-                <div className="relative group z-30">
-                  <button type="button" className={`border py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}>
-                    <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu dữ liệu...</span>
+                <div className="relative z-30">
+                  <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step4' ? '' : 'step4')} className={`border py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}>
+                    <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
-                  <div className={`absolute left-0 top-full mt-1 hidden group-hover:flex flex-col rounded-lg shadow-xl border overflow-hidden whitespace-nowrap min-w-max ${theme === 'dark' ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                  {saveProgressMenuLocation === 'step4' && <div className={`absolute left-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
                     <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2.5 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
                     <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2.5 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
-                  </div>
+                  </div>}
                 </div>
                 <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}><UploadCloud className="w-3.5 h-3.5 text-emerald-500" /><span>Nạp tiến trình (.json)</span></button>
                 <button type="button" onClick={handleDownloadCSV} className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 px-5 rounded-xl text-xs flex items-center gap-2 shadow-md transition-all cursor-pointer"><Download className="w-4 h-4" /><span>Tải tệp điểm (.csv)</span></button>
@@ -4364,6 +4402,11 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   <button type="button" onClick={() => { setAiAuditInstruction(""); setAiSuspectDetailProject(activeProject); }} className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[9px] font-bold text-slate-300 cursor-pointer">Xem lịch sử kiểm tra</button>
                 </div>
               )}
+
+              <div className={`rounded-2xl border p-4 flex items-center justify-between gap-3 ${String(activeProject.irregularitiesDetails || '').trim() ? (theme === 'dark' ? 'bg-fuchsia-950/30 border-fuchsia-500/45' : 'bg-fuchsia-50 border-fuchsia-300') : (theme === 'dark' ? 'bg-slate-900/50 border-slate-800' : 'bg-slate-50 border-slate-200')}`}>
+                <div><div className="flex items-center gap-2 text-fuchsia-500 font-bold text-xs uppercase"><AlertCircle className="w-4 h-4" /> Bất thường trong bài</div><p className="mt-1 text-[10px] text-slate-500">{String(activeProject.irregularitiesDetails || '').trim() ? 'Đã có cảnh báo; bấm để xem, chỉnh sửa hoặc tìm thêm.' : 'Chưa có cảnh báo; chỉ rà soát thêm khi GV yêu cầu.'}</p></div>
+                <button type="button" onClick={() => { setIrregularityProjectId(activeProject.id); setIrregularityInstruction(activeProject.irregularityGuidance || ''); }} className="bg-fuchsia-600 hover:bg-fuchsia-500 text-white rounded-xl px-3 py-2 text-[10px] font-bold flex items-center gap-1.5 cursor-pointer"><Search className="w-3.5 h-3.5" />{String(activeProject.irregularitiesDetails || '').trim() ? 'Xem bất thường' : 'Tìm bất thường'}</button>
+              </div>
 
               <div className="bg-red-950/20 border-2 border-red-500/30 p-5 rounded-2xl flex items-center justify-between shadow-lg shadow-red-900/30">
                 <div>

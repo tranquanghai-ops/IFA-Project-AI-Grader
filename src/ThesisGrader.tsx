@@ -56,7 +56,7 @@ const GEMINI_MODEL_FALLBACK_CHAIN = [
   "gemini-3-flash-preview",
   "gemini-2.5-flash"
 ];
-const APP_VERSION = "V1.3";
+const APP_VERSION = "V1.4";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
