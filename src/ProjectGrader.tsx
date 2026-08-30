@@ -46,7 +46,7 @@ import {
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
 
-const APP_VERSION = "V1.1";
+const APP_VERSION = "V1.2";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 const DEFAULT_REVIEW_MODEL = "gemini-3-flash-preview";
 const GEMINI_MODEL_OPTIONS = [
@@ -323,6 +323,8 @@ const validateExtractedId = (rawId, fallback) => {
   if (/^1[a-zA-Z0-9]{7}$/i.test(cleaned)) return cleaned.toUpperCase();
   return (fallback && fallback.trim() !== "") ? fallback.trim() : "Không Rõ";
 };
+
+const normalizeStudentId = value => String(value || '').trim().toUpperCase();
 
 const reconcileWithClassList = (name, id, classList) => {
   if (!classList || classList.length === 0) {
@@ -1495,13 +1497,13 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
 
     incomingFiles.forEach(file => {
       const parsed = extractInfoFromFilename(file.name);
-      const incomingStudentId = cleanId(parsed.fallbackId || '');
+      const incomingStudentId = normalizeStudentId(parsed.fallbackId || '');
       const normalizedName = String(file.name || '').trim().toLowerCase();
       const exactDuplicate = comparisonPool.find(project =>
         String(project.fileName || '').trim().toLowerCase() === normalizedName
         && Number(project.fileSize || 0) > 0
         && Number(project.fileSize) === Number(file.size)
-        && (!incomingStudentId || cleanId(project.studentId || project.fallbackId || '') === incomingStudentId)
+        && (!incomingStudentId || normalizeStudentId(project.studentId || project.fallbackId || '') === incomingStudentId)
       );
 
       if (exactDuplicate) {
@@ -1511,7 +1513,7 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
         if (!addAgain) return;
       } else if (incomingStudentId) {
         const sameStudent = comparisonPool.find(project =>
-          cleanId(project.studentId || project.fallbackId || '') === incomingStudentId
+          normalizeStudentId(project.studentId || project.fallbackId || '') === incomingStudentId
         );
         if (sameStudent) {
           const replaceExisting = window.confirm(
@@ -1550,7 +1552,6 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
       ? eventOrFiles
       : Array.from(eventOrFiles?.dataTransfer?.files || eventOrFiles?.target?.files || []);
     setIsFileDragging(false);
-    if (eventOrFiles?.target && 'value' in eventOrFiles.target) eventOrFiles.target.value = "";
 
     const supportedFiles = rawFiles.filter(file => {
       const extension = String(file.name || '').split('.').pop().toLowerCase();
@@ -1561,7 +1562,10 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     }
 
     const files = reviewDuplicateUploads(supportedFiles);
-    if (!files.length) return;
+    if (!files.length) {
+      if (eventOrFiles?.target && 'value' in eventOrFiles.target) eventOrFiles.target.value = "";
+      return;
+    }
 
     const initialGrades = {};
     const initialReviews = {};
@@ -1695,6 +1699,8 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
       };
       reader.readAsDataURL(file);
     });
+
+    if (eventOrFiles?.target && 'value' in eventOrFiles.target) eventOrFiles.target.value = "";
 
   };
 
