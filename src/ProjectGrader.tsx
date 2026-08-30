@@ -46,7 +46,7 @@ import {
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
 
-const APP_VERSION = "V1";
+const APP_VERSION = "V1.1";
 const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
 const DEFAULT_REVIEW_MODEL = "gemini-3-flash-preview";
 const GEMINI_MODEL_OPTIONS = [
@@ -422,6 +422,7 @@ export default function App() {
   const [isGradedDrawerOpen, setIsGradedDrawerOpen] = useState(false);
   const [zoomedFile, setZoomedFile] = useState(null);
   const [projects, setProjects] = useState([]);
+  const [isFileDragging, setIsFileDragging] = useState(false);
   const [activeId, setActiveId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
@@ -1544,8 +1545,22 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     return accepted;
   };
 
-  const handleBatchUpload = (e) => {
-    const files = reviewDuplicateUploads(Array.from(e.target.files));
+  const handleBatchUpload = (eventOrFiles) => {
+    const rawFiles = Array.isArray(eventOrFiles)
+      ? eventOrFiles
+      : Array.from(eventOrFiles?.dataTransfer?.files || eventOrFiles?.target?.files || []);
+    setIsFileDragging(false);
+    if (eventOrFiles?.target && 'value' in eventOrFiles.target) eventOrFiles.target.value = "";
+
+    const supportedFiles = rawFiles.filter(file => {
+      const extension = String(file.name || '').split('.').pop().toLowerCase();
+      return file.type?.startsWith('image/') || file.type === 'application/pdf' || ['doc', 'docx'].includes(extension);
+    });
+    if (supportedFiles.length !== rawFiles.length) {
+      showToast(`Đã bỏ qua ${rawFiles.length - supportedFiles.length} tệp không hỗ trợ. Chế độ chấm bài nhận PDF, Word và ảnh.`, "info");
+    }
+
+    const files = reviewDuplicateUploads(supportedFiles);
     if (!files.length) return;
 
     const initialGrades = {};
@@ -1681,7 +1696,6 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
       reader.readAsDataURL(file);
     });
 
-    e.target.value = "";
   };
 
   const buildGradingPrompt = (feedbacksMemory = gradingFeedbacks) => {
@@ -3913,15 +3927,27 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   );
                 })}
 
-                {filteredProjects.length === 0 && (
-                  <div className="col-span-full py-16 flex flex-col items-center justify-center gap-3 text-center text-slate-500 text-xs">
-                    <p>Hàng đợi trống hoặc chưa nạp tệp bài nào.</p>
-                    <label className="bg-rose-600 hover:bg-rose-500 text-white font-bold py-2 px-5 rounded-xl text-xs cursor-pointer inline-flex items-center gap-2 mt-2 transition-all">
-                      <Upload className="w-4 h-4" /> <span>NẠP TỆP BÀI TẬP (WORD/PDF/ẢNH)</span>
-                      <input type="file" accept="image/*,application/pdf,.doc,.docx" multiple onChange={handleBatchUpload} className="hidden" />
-                    </label>
+                <div
+                  className={`col-span-full ${projects.length === 0 ? 'py-14 gap-3' : 'py-3 gap-1.5'} px-6 flex flex-col items-center justify-center text-center text-xs rounded-2xl border-2 border-dashed transition-all ${isFileDragging ? 'border-rose-400 bg-rose-500/15 scale-[1.01]' : theme === 'dark' ? 'border-slate-700 bg-slate-900/30 text-slate-400 hover:border-rose-500/50' : 'border-slate-300 bg-slate-50 text-slate-500 hover:border-rose-400'}`}
+                  onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); setIsFileDragging(true); }}
+                  onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); setIsFileDragging(true); }}
+                  onDragLeave={(event) => { event.preventDefault(); event.stopPropagation(); if (!event.currentTarget.contains(event.relatedTarget)) setIsFileDragging(false); }}
+                  onDrop={(event) => { event.preventDefault(); event.stopPropagation(); handleBatchUpload(event); }}
+                >
+                  <div className={`${projects.length === 0 ? 'p-3' : 'p-1.5'} rounded-xl ${isFileDragging ? 'bg-rose-500 text-white animate-bounce' : 'bg-rose-500/10 text-rose-500'}`}>
+                    <UploadCloud className={projects.length === 0 ? "w-7 h-7" : "w-4 h-4"} />
                   </div>
-                )}
+                  <div>
+                    <p className={`font-black uppercase tracking-wider ${isFileDragging ? 'text-rose-400' : theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>
+                      {isFileDragging ? "Thả tệp vào đây để nạp bài" : projects.length === 0 ? "Kéo thả bài tập hoặc đồ án vào đây" : "Kéo thả thêm bài vào đây"}
+                    </p>
+                    {projects.length === 0 && <p className="mt-1 text-[10px]">Hỗ trợ chọn nhiều PDF, Word .doc/.docx và ảnh PNG/JPG/WEBP. Hệ thống sẽ kiểm tra tên tệp, dung lượng và MSSV trước khi thêm.</p>}
+                  </div>
+                  <label className={`bg-rose-600 hover:bg-rose-500 text-white font-bold ${projects.length === 0 ? 'py-2 px-5' : 'py-1.5 px-3'} rounded-xl ${projects.length === 0 ? 'text-xs' : 'text-[10px]'} cursor-pointer inline-flex items-center gap-2 transition-all`}>
+                    <Upload className={projects.length === 0 ? "w-4 h-4" : "w-3.5 h-3.5"} /> <span>CHỌN THÊM TỆP</span>
+                    <input type="file" accept="image/*,application/pdf,.doc,.docx" multiple onChange={handleBatchUpload} className="hidden" />
+                  </label>
+                </div>
               </div>
 
               {/* DYNAMIC PROGRESS COVERAGE TRACKER */}
