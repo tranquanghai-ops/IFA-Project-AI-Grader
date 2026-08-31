@@ -57,7 +57,7 @@ import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
 import { parseAiJson } from './shared/aiJson';
 import { ensureGeminiProjectFile } from './shared/geminiFiles';
 
-const APP_VERSION = "V1.5";
+const APP_VERSION = "V1.6";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -389,7 +389,11 @@ export default function App() {
   const [apiKeyPool, setApiKeyPool] = useState(() => loadGeminiKeyPool([
     typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-api-key') || '' : ''
   ]));
-  const [activeGeminiModel, setActiveGeminiModel] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('ifa-project-gemini-model') || DEFAULT_GEMINI_MODEL : DEFAULT_GEMINI_MODEL);
+  const [activeGeminiModel, setActiveGeminiModel] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_GEMINI_MODEL;
+    const saved = localStorage.getItem('ifa-project-gemini-model') || DEFAULT_GEMINI_MODEL;
+    return GEMINI_MODEL_OPTIONS.some(option => option.value === saved) ? saved : DEFAULT_GEMINI_MODEL;
+  });
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [draftApiKeys, setDraftApiKeys] = useState(() => [...apiKeyPool.keys]);
   const [draftActiveApiKeyIndex, setDraftActiveApiKeyIndex] = useState(apiKeyPool.activeIndex);

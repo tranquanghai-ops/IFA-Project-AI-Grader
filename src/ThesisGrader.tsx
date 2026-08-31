@@ -52,11 +52,7 @@ import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 const GEMINI_API_KEY_STORAGE = "ifa-thesis-gemini-api-key";
 const GEMINI_MODEL_SELECTION_STORAGE = "ifa-thesis-gemini-model-selection";
 const GEMINI_MODEL_PRIMARY = DEFAULT_GEMINI_MODEL;
-const GEMINI_MODEL_FALLBACK_CHAIN = [
-  "gemini-3-flash-preview",
-  "gemini-2.5-flash"
-];
-const APP_VERSION = "V1.5";
+const APP_VERSION = "V1.6";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
@@ -1351,14 +1347,11 @@ export default function App() {
   const handleGeminiModelSelectionChange = (event) => {
     const nextSelection = event.target.value;
     if (!GEMINI_MODEL_OPTIONS.some(option => option.value === nextSelection)) return;
-    const firstModel = nextSelection === "auto" ? GEMINI_MODEL_PRIMARY : nextSelection;
     try { localStorage.setItem(GEMINI_MODEL_SELECTION_STORAGE, nextSelection); } catch (_) {}
     setSelectedGeminiModel(nextSelection);
-    activeGeminiModelRef.current = firstModel;
-    setActiveGeminiModel(firstModel);
-    showToast(nextSelection === "auto"
-      ? "Đã chọn tự động chuyển model khi Gemini quá tải."
-      : `Đã chọn ${GEMINI_MODEL_OPTIONS.find(option => option.value === nextSelection)?.label || nextSelection}.`);
+    activeGeminiModelRef.current = nextSelection;
+    setActiveGeminiModel(nextSelection);
+    showToast(`Đã khóa mọi tác vụ AI vào ${GEMINI_MODEL_OPTIONS.find(option => option.value === nextSelection)?.label || nextSelection}.`);
   };
 
   const collectRawAIResponses = (project) => {
@@ -1705,10 +1698,12 @@ export default function App() {
       setShowApiKeyModal(true);
       throw new Error("Chưa có Gemini API key. Hãy bấm ‘Khóa Gemini’ và lưu khóa trước khi chấm.");
     }
-    const preferredModel = activeGeminiModelRef.current || GEMINI_MODEL_PRIMARY;
-    const candidateModels = selectedGeminiModel === "auto"
-      ? [...new Set([preferredModel, ...GEMINI_MODEL_FALLBACK_CHAIN])]
-      : [selectedGeminiModel || GEMINI_MODEL_PRIMARY];
+    // Mọi tác vụ phải dùng đúng model giảng viên đã chọn. Không tự chuyển model
+    // khi gặp 429/503 vì việc đó tiêu hao hạn mức của các model khác ngoài ý muốn.
+    const lockedModel = GEMINI_MODEL_OPTIONS.some(option => option.value === selectedGeminiModel)
+      ? selectedGeminiModel
+      : GEMINI_MODEL_PRIMARY;
+    const candidateModels = [lockedModel];
     let lastError = null;
     for (let modelIndex = 0; modelIndex < candidateModels.length; modelIndex += 1) {
       const model = candidateModels[modelIndex];
@@ -1721,7 +1716,7 @@ export default function App() {
             body: JSON.stringify(payload),
             signal
           },
-          selectedGeminiModel === "auto" ? Math.min(options.retries ?? 5, 3) : (options.retries ?? 5),
+          options.retries ?? 5,
           options.backoffMs ?? 1200,
           options.onRetry || null
         );
@@ -1736,16 +1731,9 @@ export default function App() {
         if (error?.status === 429 && /quota exceeded|exceeded your current quota|free_tier_requests/i.test(error.technicalMessage)) {
           error.message = `Đã hết hạn mức của model ${model}. Hệ thống đã dừng yêu cầu này; hãy chọn model khác hoặc kiểm tra gói Gemini API.`;
         } else if (error?.status === 503) {
-          error.message = `Model ${model} đang quá tải (Gemini API 503). ${selectedGeminiModel === "auto" ? "Hệ thống sẽ thử model dự phòng nếu còn lựa chọn." : "Hãy thử lại sau hoặc chọn chế độ Tự động/model khác."}`;
+          error.message = `Model ${model} đang quá tải (Gemini API 503). Hệ thống không tự đổi model; hãy thử lại sau hoặc tự chọn model khác.`;
         }
-        const modelUnavailable = [400, 404].includes(error?.status)
-          && /model|not found|not supported|unsupported|không.*hỗ trợ/i.test(String(error?.technicalMessage || error?.message || ""));
-        const modelOverloaded = error?.status === 503;
-        const canFallback = selectedGeminiModel === "auto" && (modelUnavailable || modelOverloaded);
-        if (!canFallback || modelIndex === candidateModels.length - 1) throw error;
-        if (options.projectId) {
-          recordGradingProgress(options.projectId, `${modelOverloaded ? `Model ${model} đang quá tải` : `Model ${model} chưa khả dụng`}; đang chuyển sang ${candidateModels[modelIndex + 1]}...`, `model-fallback-${modelIndex}`);
-        }
+        throw error;
       }
     }
     throw lastError || new Error("Không có model Gemini khả dụng.");
@@ -6413,7 +6401,9 @@ ${text.substring(0, 45000)}`;
     setIsTestingApiKey(true);
     setApiKeyStatus('Đang kiểm tra khóa với Gemini...');
     try {
-      const modelToTest = selectedGeminiModel === "auto" ? GEMINI_MODEL_PRIMARY : selectedGeminiModel;
+      const modelToTest = GEMINI_MODEL_OPTIONS.some(option => option.value === selectedGeminiModel)
+        ? selectedGeminiModel
+        : GEMINI_MODEL_PRIMARY;
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToTest}`, {
         method: 'GET',
         headers: { 'x-goog-api-key': candidateKey }
