@@ -52,12 +52,13 @@ import {
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
 import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS, getGeminiModelLabel } from './shared/geminiModels';
+import { readJsonFileWithProgress, saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
 import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
 import { parseAiJson } from './shared/aiJson';
 import { ensureGeminiProjectFile } from './shared/geminiFiles';
 
-const APP_VERSION = "V1.6";
+const APP_VERSION = "V1.7";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -422,6 +423,8 @@ export default function App() {
   const [showCalibrationReviewModal, setShowCalibrationReviewModal] = useState(false);
   const [calibrationSelectedIds, setCalibrationSelectedIds] = useState([]);
   const [saveProgressMenuLocation, setSaveProgressMenuLocation] = useState('');
+  const [isSavingProject, setIsSavingProject] = useState(false);
+  const [jsonTransferStatus, setJsonTransferStatus] = useState(null);
   const [scoreVersionProjectId, setScoreVersionProjectId] = useState(null);
   const [savingSingleProjectId, setSavingSingleProjectId] = useState(null);
   const [generatingRubricReviewKey, setGeneratingRubricReviewKey] = useState("");
@@ -1599,18 +1602,22 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     return accepted;
   };
 
-  const handleBatchUpload = (eventOrFiles) => {
+  const handleBatchUpload = async (eventOrFiles) => {
     const rawFiles = Array.isArray(eventOrFiles)
       ? eventOrFiles
       : Array.from(eventOrFiles?.dataTransfer?.files || eventOrFiles?.target?.files || []);
     setIsFileDragging(false);
 
-    const supportedFiles = rawFiles.filter(file => {
+    const jsonFiles = rawFiles.filter(file => String(file.name || '').toLowerCase().endsWith('.json'));
+    const submissionCandidates = rawFiles.filter(file => !String(file.name || '').toLowerCase().endsWith('.json'));
+    if (jsonFiles.length > 0) await importProjectJsonFiles(jsonFiles);
+
+    const supportedFiles = submissionCandidates.filter(file => {
       const extension = String(file.name || '').split('.').pop().toLowerCase();
       return file.type?.startsWith('image/') || file.type === 'application/pdf' || ['doc', 'docx'].includes(extension);
     });
-    if (supportedFiles.length !== rawFiles.length) {
-      showToast(`Đã bỏ qua ${rawFiles.length - supportedFiles.length} tệp không hỗ trợ. Chế độ chấm bài nhận PDF, Word và ảnh.`, "info");
+    if (supportedFiles.length !== submissionCandidates.length) {
+      showToast(`Đã bỏ qua ${submissionCandidates.length - supportedFiles.length} tệp không hỗ trợ. Chế độ chấm bài nhận PDF, Word, ảnh và JSON.`, "info");
     }
 
     const files = reviewDuplicateUploads(supportedFiles);
@@ -1664,6 +1671,8 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
           uploadOrder: projects.length + index + 1,
           fileName: file.name,
           fileSize: file.size,
+          fileLastModified: file.lastModified || 0,
+          sourceRelativePath: file.webkitRelativePath || "",
           studentName: finalName,
           studentId: finalId,
           fallbackName: fallbackName,
@@ -2733,19 +2742,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     }));
   };
 
-  const handleExportProject = () => {
-    const projectData = {
-      appVersion: APP_VERSION,
-      rubric, gradingInstruction, globalSubject, globalSubjectCode, globalGroup,
-      globalAcademicYear, globalSemester, globalExam, globalLecturer,
-      globalGradingStrategy, sendPdfExtractedText, projectSortMode, sketches: projects, historyList, activeId, classList, gradingFeedbacks, calibrationReview
-    };
-    const jsonString = JSON.stringify(projectData, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-
+  const makeProjectProgressFileName = (suffix = '') => {
     const now = new Date();
     const dateStr = now.toLocaleDateString('vi-VN').replace(/\//g, '-'); 
     const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); 
@@ -2755,11 +2752,99 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     if (globalSubjectCode.trim()) parts.push(globalSubjectCode.trim());
     if (globalGroup.trim()) parts.push(globalGroup.trim());
 
-    let fileName = parts.length > 0 ? `${parts.join(" - ")} - ${APP_VERSION} - ${timestamp}.json` : `MonHoc-MaMon-Nhom_${APP_VERSION}_${now.toISOString().slice(0, 10)}.json`;
-    link.setAttribute("download", fileName);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    return parts.length > 0
+      ? `${parts.join(" - ")} - ${APP_VERSION}${suffix ? ` - ${suffix}` : ''} - ${timestamp}.json`
+      : `MonHoc-MaMon-Nhom_${APP_VERSION}${suffix ? `_${suffix}` : ''}_${now.toISOString().slice(0, 10)}.json`;
+  };
+
+  const buildProjectProgressMetadata = (extra = {}) => ({
+    schemaVersion: 2,
+    appVersion: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    rubric, gradingInstruction, globalSubject, globalSubjectCode, globalGroup,
+    globalAcademicYear, globalSemester, globalExam, globalLecturer,
+    globalGradingStrategy, sendPdfExtractedText, projectSortMode,
+    historyList, activeId, classList, gradingFeedbacks, calibrationReview,
+    projectCount: projects.length,
+    ...extra
+  });
+
+  const handleExportProject = async () => {
+    if (isSavingProject) return;
+    setIsSavingProject(true);
+    setSaveProgressMenuLocation('');
+    const fileName = makeProjectProgressFileName('Day_du');
+    try {
+      let saveHandle = null;
+      if (typeof window.showSaveFilePicker === 'function') {
+        try {
+          saveHandle = await window.showSaveFilePicker({ suggestedName: fileName, types: [{ description: 'Tiến trình IFA JSON', accept: { 'application/json': ['.json'] } }] });
+        } catch (error) {
+          if (error?.name === 'AbortError') return;
+        }
+      }
+      const metadataText = JSON.stringify(buildProjectProgressMetadata({ fullProgressExport: true, filesEmbedded: true }));
+      const parts = [metadataText.slice(0, -1), ',"sketches":['];
+      let totalEmbeddedBytes = 0;
+      const writeTo = async writable => {
+        await writable.write(parts[0]);
+        await writable.write(parts[1]);
+        for (let index = 0; index < projects.length; index += 1) {
+          const project = projects[index];
+          const { base64 = '', ...withoutBase64 } = { ...project, fileUrl: null };
+          if (index > 0) await writable.write(',');
+          const projectText = JSON.stringify(withoutBase64);
+          await writable.write(projectText.slice(0, -1));
+          await writable.write(',"base64":"');
+          const base64Text = String(base64 || '');
+          totalEmbeddedBytes += base64Text.length;
+          for (let offset = 0; offset < base64Text.length; offset += 4 * 1024 * 1024) {
+            await writable.write(base64Text.slice(offset, offset + 4 * 1024 * 1024));
+          }
+          await writable.write('"}');
+          setJsonTransferStatus({ mode: 'save', label: `Đang lưu bài ${index + 1}/${projects.length}`, percent: Math.round(((index + 1) / Math.max(1, projects.length)) * 100) });
+        }
+        await writable.write('],"exportComplete":true}');
+      };
+      if (saveHandle) {
+        const writable = await saveHandle.createWritable();
+        try { await writeTo(writable); await writable.close(); } catch (error) { try { await writable.abort(); } catch (_) {} throw error; }
+      } else {
+        for (let index = 0; index < projects.length; index += 1) {
+          const project = projects[index];
+          const { base64 = '', ...withoutBase64 } = { ...project, fileUrl: null };
+          if (index > 0) parts.push(',');
+          const projectText = JSON.stringify(withoutBase64);
+          parts.push(projectText.slice(0, -1), ',"base64":"', String(base64 || ''), '"}');
+          totalEmbeddedBytes += String(base64 || '').length;
+        }
+        parts.push('],"exportComplete":true}');
+        const blob = new Blob(parts, { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a'); link.href = url; link.download = fileName; link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 30 * 60 * 1000);
+      }
+      showToast(`Đã lưu toàn bộ ${projects.length} bài${totalEmbeddedBytes ? ' kèm tệp gốc' : ''}.`, 'success');
+    } catch (error) {
+      showToast(`Không thể lưu toàn bộ tiến trình: ${error?.message || 'Lỗi không xác định'}. Nếu dữ liệu quá lớn, hãy chọn “Lưu dữ liệu – không kèm tệp”.`, 'error');
+    } finally {
+      setJsonTransferStatus(null);
+      setIsSavingProject(false);
+    }
+  };
+
+  const handleExportProjectDataOnly = () => {
+    if (isSavingProject) return;
+    setSaveProgressMenuLocation('');
+    const fileName = makeProjectProgressFileName('Khong_kem_tep');
+    const data = buildProjectProgressMetadata({
+      dataOnlyProgressExport: true,
+      filesEmbedded: false,
+      sketches: projects.map(stripEmbeddedFileData),
+      exportComplete: true
+    });
+    const bytes = saveJsonDownload(data, fileName);
+    showToast(`Đã lưu bản nhẹ ${(bytes / 1024 / 1024).toFixed(1)} MB: giữ điểm và phản hồi, không chứa Base64.`, 'success');
   };
 
   const handleExportSingleProject = (projectId) => {
@@ -2801,8 +2886,9 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
   };
 
   const handleExportGradingStyle = () => {
+    setSaveProgressMenuLocation('');
     const projectData = {
-      appVersion: APP_VERSION,
+      appVersion: APP_VERSION, gradingProfileExport: true, exportComplete: true,
       rubric, gradingInstruction, globalSubject, globalSubjectCode,
       gradingFeedbacks, globalGradingStrategy, sendPdfExtractedText
     };
@@ -2826,91 +2912,114 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     showToast("Đã xuất cấu hình phong cách chấm AI thành công!", "success");
   };
 
-  const handleImportProject = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const importedData = JSON.parse(event.target.result);
-        if (importedData.singleProjectExport === true && Array.isArray(importedData.sketches) && importedData.sketches.length === 1) {
-          let restored = importedData.sketches[0];
-          if (restored.base64 && restored.mimeType) restored = { ...restored, fileUrl: base64ToBlobUrl(restored.base64, restored.mimeType) };
-          if (restored.isGraded && (!restored.scoreVersions || restored.scoreVersions.length === 0)) {
-            const version = makeScoreVersion(restored, {}, 'legacy', 'Khôi phục từ JSON bài rời');
-            version.label = 'Lần 1';
-            restored = { ...restored, scoreVersions: [version], selectedScoreVersionId: version.id };
-          }
-          restored = { ...restored, id: restored.id || `project-${Date.now()}`, uploadOrder: Date.now(), pdfSections: normalizePdfSections(restored.pdfSections || [], restored.pdfTotalPages || 1) };
-          setProjects(previous => {
-            const sameIndex = previous.findIndex(item => (restored.studentId && restored.studentId !== 'Không Rõ' && item.studentId === restored.studentId) || item.id === restored.id);
-            if (sameIndex < 0) return [...previous, restored];
-            const next = [...previous];
-            next[sameIndex] = restored;
-            return next;
-          });
-          setActiveId(restored.id);
-          showToast('Đã nạp JSON bài rời; các bài hiện tại vẫn được giữ nguyên.', 'success');
-          return;
-        }
-        if (importedData.rubric) setRubric(importedData.rubric);
-        if (importedData.gradingInstruction !== undefined) setGradingInstruction(importedData.gradingInstruction);
-        if (importedData.globalSubject !== undefined) setGlobalSubject(importedData.globalSubject);
-        if (importedData.globalSubjectCode !== undefined) setGlobalSubjectCode(importedData.globalSubjectCode);
-        if (importedData.globalGroup !== undefined) setGlobalGroup(importedData.globalGroup);
-        if (importedData.globalAcademicYear !== undefined) setGlobalAcademicYear(importedData.globalAcademicYear);
-        if (importedData.globalSemester !== undefined) setGlobalSemester(importedData.globalSemester);
-        if (importedData.globalExam !== undefined) setGlobalExam(importedData.globalExam);
-        if (importedData.globalLecturer !== undefined) setGlobalLecturer(importedData.globalLecturer);
-        if (importedData.globalGradingStrategy) setGlobalGradingStrategy(importedData.globalGradingStrategy);
-        if (importedData.sendPdfExtractedText !== undefined) setSendPdfExtractedText(importedData.sendPdfExtractedText === true);
-        if (importedData.projectSortMode) setProjectSortMode(importedData.projectSortMode);
-        if (importedData.classList) setClassList(importedData.classList);
-        if (importedData.gradingFeedbacks) setGradingFeedbacks(importedData.gradingFeedbacks);
-        if (importedData.sketches) {
-          const recovered = importedData.sketches.map(p => {
-            let restored = p;
-            if (p.base64 && p.mimeType) {
-              restored = { ...p, fileUrl: base64ToBlobUrl(p.base64, p.mimeType) };
-            }
-            if (restored.isGraded && (!restored.scoreVersions || restored.scoreVersions.length === 0)) {
-              const version = makeScoreVersion(restored, {}, "legacy", "Khôi phục từ tiến trình phiên bản cũ");
-              version.label = "Lần 1";
-              restored = { ...restored, scoreVersions: [version], selectedScoreVersionId: version.id };
-            }
-            if (restored.isGraded && (!restored.rubricReviewVersions || Object.keys(restored.rubricReviewVersions).length === 0)) {
-              const reviewState = addRubricReviewVersions(restored, restored.reviews || {}, "Kết quả cũ");
-              restored = { ...restored, ...reviewState, dirtyRubricReviews: {}, hasUnsavedManualScore: false };
-            }
-            if (restored.isGraded && (!restored.aiDetectionVersions || restored.aiDetectionVersions.length === 0)) {
-              const aiVersionState = addAiDetectionVersion(restored, {}, "Kết quả kiểm tra cũ");
-              restored = { ...restored, ...aiVersionState };
-            }
-            restored = {
-              ...restored,
-              pdfSections: normalizePdfSections(restored.pdfSections || [], restored.pdfTotalPages || 1),
-              rubricReviewVersions: restored.rubricReviewVersions || {},
-              selectedRubricReviewVersions: restored.selectedRubricReviewVersions || {},
-              aiDetectionVersions: restored.aiDetectionVersions || [],
-              selectedAiDetectionVersionId: restored.selectedAiDetectionVersionId || "",
-              dirtyRubricReviews: restored.dirtyRubricReviews || {},
-              hasUnsavedManualScore: Boolean(restored.hasUnsavedManualScore),
-              manualScoreBaseGrades: restored.manualScoreBaseGrades || null
-            };
-            return restored;
-          });
-          setProjects(recovered);
-        }
-        if (importedData.historyList) setHistoryList(importedData.historyList);
-        if (importedData.calibrationReview) setCalibrationReview(importedData.calibrationReview);
-        if (importedData.activeId) setActiveId(importedData.activeId);
-        showToast("Nạp lại tiến trình dự án thành công!", "success");
-      } catch (err) {
-        showToast("Lỗi khi đọc file cấu trúc dự án: " + err.message, "error");
-      }
+  const restoreProjectRecord = (rawProject, sourceLabel = 'JSON') => {
+    let restored = { ...rawProject };
+    if (restored.base64 && restored.mimeType) restored.fileUrl = base64ToBlobUrl(restored.base64, restored.mimeType);
+    else {
+      restored.fileUrl = null;
+      restored.requiresReattachAfterImport = true;
+      restored.embeddingError = restored.embeddingError || 'Tiến trình không chứa tệp gốc; hãy chọn lại tệp khi cần chấm lại.';
+    }
+    if (restored.isGraded && (!restored.scoreVersions || restored.scoreVersions.length === 0)) {
+      const version = makeScoreVersion(restored, {}, 'legacy', `Khôi phục từ ${sourceLabel}`);
+      version.label = 'Lần 1';
+      restored.scoreVersions = [version];
+      restored.selectedScoreVersionId = version.id;
+    }
+    if (restored.isGraded && (!restored.rubricReviewVersions || Object.keys(restored.rubricReviewVersions).length === 0)) {
+      const reviewState = addRubricReviewVersions(restored, restored.reviews || {}, 'Kết quả cũ');
+      restored = { ...restored, ...reviewState };
+    }
+    if (restored.isGraded && (!restored.aiDetectionVersions || restored.aiDetectionVersions.length === 0)) {
+      restored = { ...restored, ...addAiDetectionVersion(restored, {}, 'Kết quả kiểm tra cũ') };
+    }
+    return {
+      ...restored,
+      id: restored.id || `project-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      uploadOrder: restored.uploadOrder || Date.now(),
+      pdfSections: normalizePdfSections(restored.pdfSections || [], restored.pdfTotalPages || 1),
+      rubricReviewVersions: restored.rubricReviewVersions || {},
+      selectedRubricReviewVersions: restored.selectedRubricReviewVersions || {},
+      aiDetectionVersions: restored.aiDetectionVersions || [],
+      selectedAiDetectionVersionId: restored.selectedAiDetectionVersionId || '',
+      dirtyRubricReviews: restored.dirtyRubricReviews || {},
+      hasUnsavedManualScore: Boolean(restored.hasUnsavedManualScore),
+      manualScoreBaseGrades: restored.manualScoreBaseGrades || null
     };
-    reader.readAsText(e.target.files[0], "UTF-8");
-    e.target.value = "";
+  };
+
+  const applyImportedProjectData = (importedData, fileName) => {
+    if (importedData.exportComplete === false) throw new Error('Tệp JSON chưa được lưu hoàn chỉnh.');
+    if (importedData.gradingProfileExport === true || (!Array.isArray(importedData.sketches) && importedData.rubric && Array.isArray(importedData.gradingFeedbacks))) {
+      if (importedData.rubric) setRubric(importedData.rubric);
+      if (importedData.gradingInstruction !== undefined) setGradingInstruction(importedData.gradingInstruction);
+      if (importedData.gradingFeedbacks) setGradingFeedbacks(importedData.gradingFeedbacks);
+      if (importedData.globalGradingStrategy) setGlobalGradingStrategy(importedData.globalGradingStrategy);
+      if (importedData.sendPdfExtractedText !== undefined) setSendPdfExtractedText(importedData.sendPdfExtractedText === true);
+      return { type: 'profile', count: 0 };
+    }
+    const isSingle = importedData.singleProjectExport === true && Array.isArray(importedData.sketches) && importedData.sketches.length === 1;
+    if (isSingle) {
+      const restored = restoreProjectRecord(importedData.sketches[0], `JSON bài rời ${fileName}`);
+      setProjects(previous => {
+        const sameIndex = previous.findIndex(item => (restored.studentId && restored.studentId !== 'Không Rõ' && item.studentId === restored.studentId) || item.id === restored.id);
+        if (sameIndex < 0) return [...previous, restored];
+        const next = [...previous]; next[sameIndex] = restored; return next;
+      });
+      setActiveId(restored.id);
+      return { type: 'single', count: 1 };
+    }
+    if (!Array.isArray(importedData.sketches)) throw new Error('JSON không chứa tiến trình, cách chấm hoặc bài rời hợp lệ.');
+    if (importedData.rubric) setRubric(importedData.rubric);
+    if (importedData.gradingInstruction !== undefined) setGradingInstruction(importedData.gradingInstruction);
+    if (importedData.globalSubject !== undefined) setGlobalSubject(importedData.globalSubject);
+    if (importedData.globalSubjectCode !== undefined) setGlobalSubjectCode(importedData.globalSubjectCode);
+    if (importedData.globalGroup !== undefined) setGlobalGroup(importedData.globalGroup);
+    if (importedData.globalAcademicYear !== undefined) setGlobalAcademicYear(importedData.globalAcademicYear);
+    if (importedData.globalSemester !== undefined) setGlobalSemester(importedData.globalSemester);
+    if (importedData.globalExam !== undefined) setGlobalExam(importedData.globalExam);
+    if (importedData.globalLecturer !== undefined) setGlobalLecturer(importedData.globalLecturer);
+    if (importedData.globalGradingStrategy) setGlobalGradingStrategy(importedData.globalGradingStrategy);
+    if (importedData.sendPdfExtractedText !== undefined) setSendPdfExtractedText(importedData.sendPdfExtractedText === true);
+    if (importedData.projectSortMode) setProjectSortMode(importedData.projectSortMode);
+    if (importedData.classList) setClassList(importedData.classList);
+    if (importedData.gradingFeedbacks) setGradingFeedbacks(importedData.gradingFeedbacks);
+    setProjects(importedData.sketches.map(project => restoreProjectRecord(project, `tiến trình ${fileName}`)));
+    if (importedData.historyList) setHistoryList(importedData.historyList);
+    if (importedData.calibrationReview) setCalibrationReview(importedData.calibrationReview);
+    if (importedData.activeId) setActiveId(importedData.activeId);
+    return { type: importedData.dataOnlyProgressExport ? 'data-only' : 'full', count: importedData.sketches.length };
+  };
+
+  const importProjectJsonFiles = async filesInput => {
+    const files = Array.from(filesInput || []);
+    if (!files.length) return;
+    const errors = [];
+    let importedCount = 0;
+    let profileCount = 0;
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      try {
+        const rawText = await readJsonFileWithProgress(file, percent => setJsonTransferStatus({
+          mode: 'load', label: `Đang nạp JSON ${index + 1}/${files.length}: ${file.name}`, percent
+        }));
+        const result = applyImportedProjectData(JSON.parse(rawText), file.name);
+        importedCount += result.count;
+        if (result.type === 'profile') profileCount += 1;
+      } catch (error) {
+        errors.push(`${file.name}: ${error?.message || 'Lỗi không xác định'}`);
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 0));
+    }
+    setJsonTransferStatus(null);
+    if (errors.length) showToast(`Đã xử lý ${files.length - errors.length}/${files.length} JSON. Lỗi: ${errors.slice(0, 2).join(' | ')}`, 'error');
+    else showToast(`Đã nạp ${importedCount} bài${profileCount ? ` và ${profileCount} cách chấm` : ''} từ ${files.length} tệp JSON.`, 'success');
+  };
+
+  const handleImportProject = async e => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    await importProjectJsonFiles(files);
   };
 
   const getSingleExcelString = (projectItem, index) => {
@@ -3332,6 +3441,12 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
             <span className="max-h-32 max-w-[75vw] overflow-y-auto whitespace-pre-wrap">{toast.message}</span>
             <button type="button" onClick={() => setToast({ message: "", type: "success" })} className="rounded-lg p-1.5 hover:bg-white/10" aria-label="Đóng thông báo" title="Đóng"><X className="h-4 w-4" /></button>
           </div>
+        </div>
+      )}
+      {jsonTransferStatus && (
+        <div className="fixed top-24 left-1/2 z-[10020] w-[min(92vw,620px)] -translate-x-1/2 rounded-2xl border border-cyan-500/40 bg-slate-950/95 p-4 text-cyan-200 shadow-2xl">
+          <div className="flex items-center justify-between gap-3 text-xs font-bold"><span>{jsonTransferStatus.label}</span><span>{jsonTransferStatus.percent}%</span></div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all" style={{ width: `${jsonTransferStatus.percent}%` }} /></div>
         </div>
       )}
 
@@ -3853,8 +3968,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
                 <div className="flex items-center gap-3 flex-wrap">
                   <label className={`font-bold py-1.5 px-3 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 border shadow-md transition-all ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-white border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-300'}`}>
-                    <Upload className="w-3.5 h-3.5 text-rose-400" /> <span>Nạp Ảnh, Word hoặc PDF...</span>
-                    <input type="file" accept="image/*,application/pdf,.doc,.docx" multiple onChange={handleBatchUpload} className="hidden" />
+                    <Upload className="w-3.5 h-3.5 text-rose-400" /> <span>Nộp bài / Nạp JSON...</span>
+                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,application/json" multiple onChange={handleBatchUpload} className="hidden" />
                   </label>
                   <label className={`font-bold py-1.5 px-3 rounded-lg text-xs flex items-center gap-2 border ${theme === 'dark' ? 'bg-indigo-950/50 text-indigo-200 border-indigo-700/50' : 'bg-indigo-50 text-indigo-800 border-indigo-200'}`}>
                     <BookOpen className="w-3.5 h-3.5" />
@@ -3877,9 +3992,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step2' ? '' : 'step2')} className={`border py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-md transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`} title="Bấm để chọn loại dữ liệu cần lưu">
                       <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /> <span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                     </button>
-                    {saveProgressMenuLocation === 'step2' && <div className={`absolute right-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                      <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
-                      <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
+                    {saveProgressMenuLocation === 'step2' && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
+                      <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64, điểm, nhận xét, rubric và cách chấm.</span></button>
+                      <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Giữ điểm, phản hồi và dấu vân tay tệp; không lưu Base64.</span></button>
+                      <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm rubric, hướng dẫn và quy tắc AI đã học; không chứa bài.</span></button>
                     </div>}
                   </div>
                   <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-md transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`} title="Nạp lại tiến trình">
@@ -4061,11 +4177,11 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     <p className={`font-black uppercase tracking-wider ${isFileDragging ? 'text-rose-400' : theme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}>
                       {isFileDragging ? "Thả tệp vào đây để nạp bài" : projects.length === 0 ? "Kéo thả bài tập hoặc đồ án vào đây" : "Kéo thả thêm bài vào đây"}
                     </p>
-                    {projects.length === 0 && <p className="mt-1 text-[10px]">Hỗ trợ chọn nhiều PDF, Word .doc/.docx và ảnh PNG/JPG/WEBP. Hệ thống sẽ kiểm tra tên tệp, dung lượng và MSSV trước khi thêm.</p>}
+                    {projects.length === 0 && <p className="mt-1 text-[10px]">Hỗ trợ nhiều PDF, Word, ảnh, JSON tiến trình/cách chấm và nhiều JSON bài rời.</p>}
                   </div>
                   <label className={`bg-rose-600 hover:bg-rose-500 text-white font-bold ${projects.length === 0 ? 'py-2 px-5' : 'py-1.5 px-3'} rounded-xl ${projects.length === 0 ? 'text-xs' : 'text-[10px]'} cursor-pointer inline-flex items-center gap-2 transition-all`}>
                     <Upload className={projects.length === 0 ? "w-4 h-4" : "w-3.5 h-3.5"} /> <span>CHỌN THÊM TỆP</span>
-                    <input type="file" accept="image/*,application/pdf,.doc,.docx" multiple onChange={handleBatchUpload} className="hidden" />
+                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,application/json" multiple onChange={handleBatchUpload} className="hidden" />
                   </label>
                 </div>
               </div>
@@ -4122,9 +4238,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step3' ? '' : 'step3')} className={`border font-semibold py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`} title="Bấm để chọn loại dữ liệu cần lưu">
                     <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
-                  {saveProgressMenuLocation === 'step3' && <div className={`absolute right-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                    <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
-                    <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
+                  {saveProgressMenuLocation === 'step3' && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
+                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64 và toàn bộ kết quả.</span></button>
+                    <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Bản nhẹ để tránh JSON hàng GB; cần chọn lại tệp khi chấm lại.</span></button>
+                    <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Không chứa bài sinh viên.</span></button>
                   </div>}
                 </div>
                 <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border font-semibold py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 transition-all shadow-sm cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-300 text-emerald-500 hover:bg-slate-50'}`} title="Nạp tiến trình từ tệp JSON"><UploadCloud className="w-3.5 h-3.5 text-emerald-500" /><span>Nạp tiến trình</span></button>
@@ -4215,9 +4332,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   <button type="button" onClick={() => setSaveProgressMenuLocation(current => current === 'step4' ? '' : 'step4')} className={`border py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}>
                     <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
-                  {saveProgressMenuLocation === 'step4' && <div className={`absolute left-0 top-full mt-2 z-[200] flex flex-col rounded-xl shadow-2xl border overflow-hidden whitespace-nowrap min-w-max p-1 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                    <button type="button" onClick={handleExportProject} className={`text-left px-4 py-2.5 text-xs font-semibold hover:bg-rose-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu toàn bộ tiến trình (.json)</button>
-                    <button type="button" onClick={handleExportGradingStyle} className={`text-left px-4 py-2.5 text-xs font-semibold hover:bg-indigo-500 hover:text-white transition-colors ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>Lưu cách chấm điểm của AI (.json)</button>
+                  {saveProgressMenuLocation === 'step4' && <div className={`absolute left-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
+                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64 và toàn bộ kết quả.</span></button>
+                    <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Giữ điểm và phản hồi, không chứa Base64.</span></button>
+                    <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Không chứa bài sinh viên.</span></button>
                   </div>}
                 </div>
                 <button type="button" onClick={() => projectFileInputRef.current && projectFileInputRef.current.click()} className={`border py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}><UploadCloud className="w-3.5 h-3.5 text-emerald-500" /><span>Nạp tiến trình (.json)</span></button>
@@ -5347,7 +5465,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
       {/* HIDDEN INPUTS FOR FILE HANDLING */}
       <input type="file" ref={rubricFileInputRef} accept=".csv" onChange={handleImportRubric} className="hidden" />
-      <input type="file" ref={projectFileInputRef} accept=".json" onChange={handleImportProject} className="hidden" />
+      <input type="file" ref={projectFileInputRef} accept=".json,application/json" multiple onChange={handleImportProject} className="hidden" />
       <input type="file" ref={smartRubricInputRef} accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" onChange={handleSmartRubricUpload} className="hidden" />
       
       {/* Dynamic input for student Class List files */}

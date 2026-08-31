@@ -45,6 +45,7 @@ import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMIN
 import { loadRubricEntry, loadRubricManifest } from './rubricLibrary';
 import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS } from './shared/geminiModels';
 import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
+import { saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -52,7 +53,7 @@ import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 const GEMINI_API_KEY_STORAGE = "ifa-thesis-gemini-api-key";
 const GEMINI_MODEL_SELECTION_STORAGE = "ifa-thesis-gemini-model-selection";
 const GEMINI_MODEL_PRIMARY = DEFAULT_GEMINI_MODEL;
-const APP_VERSION = "V1.6";
+const APP_VERSION = "V1.7";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
@@ -1178,6 +1179,7 @@ export default function App() {
   const [batchLoading, setBatchLoading] = useState(false);
   const [isFileDragging, setIsFileDragging] = useState(false);
   const [isSavingProject, setIsSavingProject] = useState(false);
+  const [jsonTransferStatus, setJsonTransferStatus] = useState(null);
   const [savingSingleProjectId, setSavingSingleProjectId] = useState(null);
   const [loadingStep, setLoadingStep] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -3594,6 +3596,8 @@ Chỉ trả về JSON.`;
         uploadOrder: projects.length + index + 1,
         fileName: file.name,
         fileSize: file.size,
+        fileLastModified: file.lastModified || 0,
+        sourceRelativePath: file.webkitRelativePath || "",
         studentName: finalName,
         studentId: finalId,
         thesisTitle: finalTitle,
@@ -5544,7 +5548,7 @@ ${text.substring(0, 45000)}`;
       const file = selectedFiles[index];
       try {
         showToast(`Đang đọc JSON bài ${index + 1}/${selectedFiles.length}: ${file.name}...`);
-        const rawJson = await readLargeJsonFileText(file);
+        const rawJson = await readLargeJsonFileText(file, percent => setJsonTransferStatus({ mode: 'load', label: `Đang nạp JSON bài ${index + 1}/${selectedFiles.length}: ${file.name}`, percent }));
         const importedData = parseJsonFileText(rawJson);
         if (importedData.singleProjectExport !== true || !Array.isArray(importedData.sketches) || importedData.sketches.length !== 1) {
           throw new Error("Không phải JSON lưu riêng một bài; hãy dùng nút Nạp lại tiến trình nếu đây là JSON toàn bộ.");
@@ -5630,6 +5634,7 @@ ${text.substring(0, 45000)}`;
     } else {
       showToast(`Đã nạp ${restoredItems.length} bài JSON; các bài khác được giữ nguyên.`);
     }
+    setJsonTransferStatus(null);
   };
 
   const handleImportSingleProject = async (event) => {
@@ -5698,6 +5703,42 @@ ${text.substring(0, 45000)}`;
     }
   };
 
+  const handleExportProjectDataOnly = () => {
+    if (isSavingProject) return;
+    setSaveProgressMenuLocation('');
+    const now = new Date();
+    const timestamp = `${now.toLocaleDateString('vi-VN').replace(/\//g, '-')}_${now.toTimeString().split(' ')[0].replace(/:/g, '-')}`;
+    const fileName = `ChamDATN_${lecturerRole}_Khong_kem_tep_${timestamp}.json`;
+    const data = {
+      schemaVersion: PROJECT_SCHEMA_VERSION,
+      appVersion: APP_VERSION,
+      exportedAt: now.toISOString(),
+      dataOnlyProgressExport: true,
+      filesEmbedded: false,
+      rubric,
+      lecturerRole,
+      globalLecturer,
+      globalGraduationBatch,
+      globalMajor,
+      globalGradingStrategy,
+      sendPdfExtractedText,
+      activeId,
+      classList,
+      classListsByRole,
+      gradingFeedbacks,
+      gradingGuide,
+      calibrationReview,
+      calibrationScope,
+      calibrationSelectedIds,
+      projectCount: projects.length,
+      sketches: projects.map(stripEmbeddedFileData),
+      historyList,
+      exportComplete: true
+    };
+    const bytes = saveJsonDownload(data, fileName);
+    showToast(`Đã lưu bản nhẹ ${(bytes / 1024 / 1024).toFixed(1)} MB: giữ kết quả và vị trí tham chiếu, không chứa Base64.`);
+  };
+
   const handleExportProject = async () => {
     if (isSavingProject) return;
     setIsSavingProject(true);
@@ -5725,7 +5766,9 @@ ${text.substring(0, 45000)}`;
       }
 
       const recoveredProjects = [];
-      for (const project of projects) {
+      for (let projectIndex = 0; projectIndex < projects.length; projectIndex += 1) {
+        const project = projects[projectIndex];
+        setJsonTransferStatus({ mode: 'save', label: `Đang chuẩn bị bài ${projectIndex + 1}/${projects.length}: ${project.fileName || project.studentId || ''}`, percent: Math.round((projectIndex / Math.max(1, projects.length)) * 100) });
         let embeddedBase64 = project.base64 || "";
         if (!embeddedBase64) {
           showToast(`Đang hoàn tất nhúng tệp “${project.fileName}” trước khi lưu...`);
@@ -5785,6 +5828,7 @@ ${text.substring(0, 45000)}`;
       const memoryHint = error instanceof RangeError ? " Tệp JSON quá lớn so với bộ nhớ trình duyệt; hãy đóng bớt tab rồi thử lại." : "";
       showToast(`Không thể lưu tiến trình: ${error?.message || "Lỗi không xác định."}${memoryHint}`, "error");
     } finally {
+      setJsonTransferStatus(null);
       setIsSavingProject(false);
     }
   };
@@ -5818,6 +5862,7 @@ ${text.substring(0, 45000)}`;
         // nhờ đó bộ nhớ đỉnh chỉ tương ứng một bài thay vì toàn bộ JSON 500 MB+.
         const restoredSourceBlobs = new Map();
         const importedData = await parseProgressJsonByProjectStream(file, ({ progress, projectCount, totalProjectCount }) => {
+          setJsonTransferStatus({ mode: 'load', label: `Đang nạp tiến trình: đã đọc ${projectCount}${totalProjectCount ? `/${totalProjectCount}` : ''} bài`, percent: progress });
           if (projectCount > lastRestoredProjectCount) {
             lastRestoredProjectCount = projectCount;
             showToast(`Đã đọc xong ${projectCount}${totalProjectCount ? `/${totalProjectCount}` : ''} bài – ${progress}%...`);
@@ -5901,7 +5946,9 @@ ${text.substring(0, 45000)}`;
         }
         if (importedData.historyList) setHistoryList(importedData.historyList.map(item => ({ ...item, grades: migrateLegacySpaceGrades(item.grades || {}) })));
         if (importedData.activeId) setActiveId(importedData.activeId);
-        if (missingPdfCount > 0) {
+        if (importedData.dataOnlyProgressExport === true) {
+          showToast(`Đã nạp bản tiến trình nhẹ gồm ${recovered.length} bài; điểm và phản hồi đã được giữ. Hãy chọn lại tệp gốc khi cần xem hoặc chấm lại.`);
+        } else if (missingPdfCount > 0) {
           showToast(`${missingPdfCount} PDF cũ chưa được nhúng trong tệp JSON; vẫn xem được kết quả nhưng cần nạp lại PDF để chấm lại.`, "error");
         } else {
           showToast(`Nạp tiến trình thành công${importedData.appVersion ? ` – tạo bằng ${importedData.appVersion}` : ""}!`);
@@ -5912,6 +5959,8 @@ ${text.substring(0, 45000)}`;
         showToast(isIncompleteJson
           ? `Tệp JSON chưa hoàn chỉnh hoặc đã bị cắt khi tải xuống. Tệp này không thể khôi phục phần dữ liệu đã mất; hãy mở ứng dụng trên máy cũ và lưu lại bằng phiên bản ${APP_VERSION}.`
           : `Lỗi đọc file cấu trúc dự án: ${rawMessage}`, "error");
+      } finally {
+        setJsonTransferStatus(null);
       }
   };
 
@@ -6470,6 +6519,12 @@ ${text.substring(0, 45000)}`;
           </div>
         </div>
       )}
+      {jsonTransferStatus && (
+        <div className="fixed top-24 left-1/2 z-[10020] w-[min(92vw,620px)] -translate-x-1/2 rounded-2xl border border-cyan-500/40 bg-slate-950/95 p-4 text-cyan-200 shadow-2xl">
+          <div className="flex items-center justify-between gap-3 text-xs font-bold"><span>{jsonTransferStatus.label}</span><span>{jsonTransferStatus.percent}%</span></div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all" style={{ width: `${jsonTransferStatus.percent}%` }} /></div>
+        </div>
+      )}
 
       {showApiKeyModal && serverGeminiChecked && !serverGeminiAvailable && (
         <div className="fixed inset-0 z-[1000000] bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
@@ -6940,6 +6995,7 @@ ${text.substring(0, 45000)}`;
                     </button>
                     {saveProgressMenuLocation === 'step2' && !isSavingProject && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl border p-2 shadow-2xl ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
                       <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm tất cả bài, PDF, điểm, nhận xét, rubric và cách chấm.</span></button>
+                      <button type="button" onClick={handleExportProjectDataOnly} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-cyan-300' : 'hover:bg-cyan-50 text-cyan-700'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="block mt-0.5 text-[9px] text-slate-500">Giữ điểm, phản hồi và dấu vân tay tệp; không chứa Base64.</span></button>
                       <button type="button" onClick={handleExportGradingProfile} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-emerald-300' : 'hover:bg-emerald-50 text-emerald-700'}`}><b>Chỉ lưu cách chấm của giảng viên</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm rubric, Hướng dẫn chấm và các quy tắc AI đã học; không chứa bài sinh viên.</span></button>
                     </div>}
                   </div>
@@ -7246,6 +7302,7 @@ ${text.substring(0, 45000)}`;
                   </button>
                   {saveProgressMenuLocation === 'step3' && !isSavingProject && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl border p-2 shadow-2xl ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
                     <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm bài, PDF, điểm, nhận xét và cách chấm.</span></button>
+                    <button type="button" onClick={handleExportProjectDataOnly} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-cyan-300' : 'hover:bg-cyan-50 text-cyan-700'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="block mt-0.5 text-[9px] text-slate-500">Bản nhẹ, cần chọn lại tệp khi xem hoặc chấm lại.</span></button>
                     <button type="button" onClick={handleExportGradingProfile} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-emerald-300' : 'hover:bg-emerald-50 text-emerald-700'}`}><b>Chỉ lưu cách chấm của giảng viên</b><span className="block mt-0.5 text-[9px] text-slate-500">Không chứa bài sinh viên; nạp lại sẽ giữ nguyên các bài đang có.</span></button>
                   </div>}
                 </div>
