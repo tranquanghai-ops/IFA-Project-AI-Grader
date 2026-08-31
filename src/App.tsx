@@ -98,7 +98,7 @@ function ModePicker({ onSelect }: { onSelect: (mode: GradingMode) => void }) {
         </div>
 
         <p className="mt-8 text-center text-[11px] font-semibold uppercase tracking-widest text-slate-600">
-          IFA AI Grader · Phiên bản V1.4
+          IFA AI Grader · Phiên bản V1.5
         </p>
       </div>
     </main>
@@ -117,7 +117,8 @@ export default function App() {
     setMode(nextMode);
   };
 
-  if (!mode) return <ModePicker onSelect={selectMode} />;
+  const hasVisitedMode = visited.project || visited.thesis;
+  if (!mode && !hasVisitedMode) return <ModePicker onSelect={selectMode} />;
 
   return (
     <ModeErrorBoundary onBack={() => setMode(null)}>
@@ -131,7 +132,9 @@ export default function App() {
           </main>
         }
       >
-        <div className="fixed bottom-4 right-4 z-[9999]">
+        {!mode && <div className="fixed inset-0 z-[10000] overflow-auto bg-slate-950"><ModePicker onSelect={selectMode} /></div>}
+
+        {mode && <div className="fixed bottom-4 right-4 z-[9999]">
           <button
             type="button"
             onClick={() => setMode(null)}
@@ -141,7 +144,7 @@ export default function App() {
             <Home className="h-4 w-4" />
             Đổi chế độ
           </button>
-        </div>
+        </div>}
 
         {visited.project && (
           <section style={{ display: mode === "project" ? "block" : "none" }}>

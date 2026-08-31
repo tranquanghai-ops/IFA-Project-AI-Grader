@@ -55,8 +55,9 @@ import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS, getGeminiModelLabel } from 
 import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
 import { parseAiJson } from './shared/aiJson';
+import { ensureGeminiProjectFile } from './shared/geminiFiles';
 
-const APP_VERSION = "V1.4";
+const APP_VERSION = "V1.5";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -416,9 +417,9 @@ export default function App() {
   const [calibrationReview, setCalibrationReview] = useState(null);
   const [showCalibrationReviewModal, setShowCalibrationReviewModal] = useState(false);
   const [calibrationSelectedIds, setCalibrationSelectedIds] = useState([]);
-  const [showCalibrationSelection, setShowCalibrationSelection] = useState(false);
   const [saveProgressMenuLocation, setSaveProgressMenuLocation] = useState('');
   const [scoreVersionProjectId, setScoreVersionProjectId] = useState(null);
+  const [savingSingleProjectId, setSavingSingleProjectId] = useState(null);
   const [generatingRubricReviewKey, setGeneratingRubricReviewKey] = useState("");
 
   const [gradingFeedbacks, setGradingFeedbacks] = useState([]);
@@ -442,6 +443,7 @@ export default function App() {
   const stopBatchRef = useRef(false);
   const activeRequestControllerRef = useRef(null);
   const pdfProcessingRef = useRef(new Set());
+  const geminiFileOperationsRef = useRef(new Map());
 
   const [classList, setClassList] = useState([]);
   const [showClassListComparisonModal, setShowClassListComparisonModal] = useState(false);
@@ -800,6 +802,39 @@ export default function App() {
     }
   };
 
+  const updateGeminiFileMetadata = (projectId, metadata = {}) => {
+    setProjects(previous => previous.map(project => project.id === projectId ? {
+      ...project,
+      geminiFileName: metadata.name || '',
+      geminiFileUri: metadata.uri || '',
+      geminiFileState: metadata.state || '',
+      geminiFileMimeType: metadata.mimeType || project.mimeType || 'application/pdf',
+      geminiFileExpiresAt: metadata.expirationTime || '',
+      geminiFileUploadedAt: metadata.createTime || (metadata.name ? new Date().toISOString() : ''),
+      geminiFileError: metadata.error || ''
+    } : project));
+  };
+
+  const ensureProjectStoredOnGemini = async (project, signal) => {
+    if (project.mimeType !== 'application/pdf') return null;
+    const running = geminiFileOperationsRef.current.get(project.id);
+    if (running) return running;
+    const operation = ensureGeminiProjectFile({
+      project, apiKey, signal,
+      onStatus: message => recordGradingProgress(project.id, message, 'gemini-file')
+    }).then(metadata => {
+      if (metadata) updateGeminiFileMetadata(project.id, metadata);
+      return metadata;
+    }).catch(error => {
+      if (error?.name === 'AbortError') throw error;
+      updateGeminiFileMetadata(project.id, { error: error?.message || 'Files API không khả dụng' });
+      recordGradingProgress(project.id, `Không thể tái sử dụng tệp Gemini (${error?.message || 'không xác định'}); chuyển sang gửi ảnh từng trang.`, 'gemini-file-fallback');
+      return null;
+    }).finally(() => geminiFileOperationsRef.current.delete(project.id));
+    geminiFileOperationsRef.current.set(project.id, operation);
+    return operation;
+  };
+
   useEffect(() => {
     if (projects.length > 0) {
       let updated = false;
@@ -1010,6 +1045,7 @@ export default function App() {
         aiGeneratedStatus: version.aiGeneratedStatus || "none",
         aiGeneratedDetails: version.aiGeneratedDetails || "",
         aiDetectionReport: version.aiDetectionReport || null,
+        gradingModel: version.gradingModel || project.gradingModel || "",
         selectedScoreVersionId: version.id,
         hasUnsavedManualScore: false,
         manualScoreBaseGrades: null,
@@ -1648,6 +1684,13 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
           pdfTotalPages: 0,
           pdfSections: [],
           pdfPageTexts: [],
+          geminiFileName: "",
+          geminiFileUri: "",
+          geminiFileState: "",
+          geminiFileMimeType: "",
+          geminiFileExpiresAt: "",
+          geminiFileUploadedAt: "",
+          geminiFileError: "",
           pdfStructureReady: mimeType !== 'application/pdf',
           isStructureProcessing: mimeType === 'application/pdf',
           gradingProgress: [],
@@ -1776,6 +1819,7 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
 
   const performSingleGradingWithFeedbacks = async (project, feedbacksMemory = gradingFeedbacks, modelOverride = "") => {
     const gradingModel = modelOverride || activeGeminiModel || DEFAULT_GEMINI_MODEL;
+    const requestSignal = activeRequestControllerRef.current?.signal;
     let fileData = project.base64;
     if (!fileData) throw new Error("Không tìm thấy dữ liệu tệp bài nộp.");
 
@@ -1837,6 +1881,9 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
     };
 
     let dedicatedAiAudit = null;
+    const geminiStoredFile = project.mimeType === 'application/pdf'
+      ? await ensureProjectStoredOnGemini(project, requestSignal)
+      : null;
 
     let payload;
     if (project.mimeType === 'application/pdf' && window.pdfjsLib) {
@@ -1904,17 +1951,20 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
 Không coi phong cách đẹp, ảnh render, độ chân thực cao, nhiễu JPEG hoặc thiếu nét dựng là bằng chứng độc lập. Mỗi phát hiện phải chỉ rõ trang và chi tiết nhìn thấy. Ghi cả dấu hiệu mức Trung bình/Cao vào aiVisualFindings; không ghi suy đoán chung chung.
 
 RUBRIC:\n${rubric.map(item => `- ${item.id}: ${item.name} (${item.maxScore}) – ${item.desc}`).join("\n")}` }];
+        if (geminiStoredFile?.uri) chunkParts.push({ fileData: { mimeType: geminiStoredFile.mimeType || 'application/pdf', fileUri: geminiStoredFile.uri } });
         const textParts = [];
         for (let pageNumber = range.startPage; pageNumber <= range.endPage; pageNumber++) {
           const pageText = pageTexts.find(item => item.page === pageNumber)?.text || "";
           if (pageText) textParts.push(`[Trang ${pageNumber}] ${pageText}`);
-          const page = await pdf.getPage(pageNumber);
-          const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
-          const canvas = document.createElement('canvas');
-          canvas.width = viewport.width; canvas.height = viewport.height;
-          await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-          chunkParts.push({ text: `[Ảnh trang ${pageNumber}/${totalPages}]` });
-          chunkParts.push({ inlineData: { mimeType: "image/jpeg", data: canvas.toDataURL("image/jpeg", PDF_JPEG_QUALITY).split(",")[1] } });
+          if (!geminiStoredFile?.uri) {
+            const page = await pdf.getPage(pageNumber);
+            const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width; canvas.height = viewport.height;
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            chunkParts.push({ text: `[Ảnh trang ${pageNumber}/${totalPages}]` });
+            chunkParts.push({ inlineData: { mimeType: "image/jpeg", data: canvas.toDataURL("image/jpeg", PDF_JPEG_QUALITY).split(",")[1] } });
+          }
         }
         if (sendPdfExtractedText && textParts.length) chunkParts.splice(1, 0, { text: `VĂN BẢN TRÍCH XUẤT:\n${textParts.join("\n").slice(0, MAX_PDF_TEXT_CHARS)}` });
         const chunkPayload = {
@@ -1962,7 +2012,8 @@ NGUYÊN TẮC GIẢM BÁO SAI:
 
 HỒ SƠ QUÉT CHI TIẾT TỪNG PHẦN/CỤM:
 ${JSON.stringify(chunkSummaries)}` }];
-      for (let sheetStart = 1; sheetStart <= totalPages; sheetStart += 4) {
+      if (geminiStoredFile?.uri) auditParts.unshift({ fileData: { mimeType: geminiStoredFile.mimeType || 'application/pdf', fileUri: geminiStoredFile.uri } });
+      for (let sheetStart = 1; !geminiStoredFile?.uri && sheetStart <= totalPages; sheetStart += 4) {
         const rendered = [];
         for (let pageNumber = sheetStart; pageNumber <= Math.min(totalPages, sheetStart + 3); pageNumber++) {
           const page = await pdf.getPage(pageNumber);
@@ -2707,6 +2758,44 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     document.body.removeChild(link);
   };
 
+  const handleExportSingleProject = (projectId) => {
+    const project = projects.find(item => item.id === projectId);
+    if (!project) return;
+    setSavingSingleProjectId(projectId);
+    try {
+      const payload = {
+        appVersion: APP_VERSION,
+        singleProjectExport: true,
+        exportedAt: new Date().toISOString(),
+        rubric,
+        gradingInstruction,
+        gradingFeedbacks,
+        globalSubject,
+        globalSubjectCode,
+        globalGroup,
+        globalAcademicYear,
+        globalSemester,
+        globalExam,
+        globalLecturer,
+        sketches: [project]
+      };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeId = String(project.studentId || 'Khong_MSSV').replace(/[^a-zA-Z0-9_-]+/g, '_');
+      const safeName = String(project.studentName || 'Sinh_vien').replace(/[^a-zA-ZÀ-ỹ0-9_-]+/g, '_');
+      link.href = url;
+      link.download = `IFA_Bai_${safeId}_${safeName}_${APP_VERSION}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`Đã lưu riêng bài ${project.studentName || project.studentId || ''}.`, 'success');
+    } finally {
+      setSavingSingleProjectId(null);
+    }
+  };
+
   const handleExportGradingStyle = () => {
     const projectData = {
       appVersion: APP_VERSION,
@@ -2740,6 +2829,26 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     reader.onload = (event) => {
       try {
         const importedData = JSON.parse(event.target.result);
+        if (importedData.singleProjectExport === true && Array.isArray(importedData.sketches) && importedData.sketches.length === 1) {
+          let restored = importedData.sketches[0];
+          if (restored.base64 && restored.mimeType) restored = { ...restored, fileUrl: base64ToBlobUrl(restored.base64, restored.mimeType) };
+          if (restored.isGraded && (!restored.scoreVersions || restored.scoreVersions.length === 0)) {
+            const version = makeScoreVersion(restored, {}, 'legacy', 'Khôi phục từ JSON bài rời');
+            version.label = 'Lần 1';
+            restored = { ...restored, scoreVersions: [version], selectedScoreVersionId: version.id };
+          }
+          restored = { ...restored, id: restored.id || `project-${Date.now()}`, uploadOrder: Date.now(), pdfSections: normalizePdfSections(restored.pdfSections || [], restored.pdfTotalPages || 1) };
+          setProjects(previous => {
+            const sameIndex = previous.findIndex(item => (restored.studentId && restored.studentId !== 'Không Rõ' && item.studentId === restored.studentId) || item.id === restored.id);
+            if (sameIndex < 0) return [...previous, restored];
+            const next = [...previous];
+            next[sameIndex] = restored;
+            return next;
+          });
+          setActiveId(restored.id);
+          showToast('Đã nạp JSON bài rời; các bài hiện tại vẫn được giữ nguyên.', 'success');
+          return;
+        }
         if (importedData.rubric) setRubric(importedData.rubric);
         if (importedData.gradingInstruction !== undefined) setGradingInstruction(importedData.gradingInstruction);
         if (importedData.globalSubject !== undefined) setGlobalSubject(importedData.globalSubject);
@@ -3755,9 +3864,9 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   <button type="button" onClick={handleBatchGradeAll} disabled={batchLoading || projects.length === 0} className="bg-gradient-to-r from-rose-600 to-amber-500 hover:from-rose-500 hover:to-amber-400 disabled:opacity-50 text-white font-black py-1.5 px-4 rounded-lg text-xs flex items-center gap-1.5 shadow-lg shadow-rose-950/40 transition-all uppercase tracking-wider cursor-pointer">
                     <Play className="w-3.5 h-3.5 fill-white" /> <span>Chấm tự động tất cả bằng AI</span>
                   </button>
-                  <button type="button" onClick={() => setShowCalibrationSelection(value => !value)} className={`border py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer ${showCalibrationSelection ? 'bg-violet-950 border-violet-400 text-violet-300' : theme === 'dark' ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-white border-slate-300 text-slate-700'}`}><CheckSquare className="w-3.5 h-3.5" />Chọn bài ({calibrationSelectedIds.length})</button>
+                  {calibrationSelectedIds.length > 0 && <button type="button" onClick={() => setCalibrationSelectedIds([])} className={`border py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 cursor-pointer ${theme === 'dark' ? 'bg-violet-950 border-violet-400 text-violet-300' : 'bg-violet-50 border-violet-300 text-violet-700'}`}><X className="w-3.5 h-3.5" />Bỏ chọn ({calibrationSelectedIds.length})</button>}
                   <button type="button" onClick={handleCalibrateGradedProjects} disabled={isCalibratingScores || batchLoading || (calibrationSelectedIds.length > 0 ? calibrationSelectedIds.length < 2 : projects.filter(project => project.isGraded && !project.aiGradingFailed).length < 2)} className="bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white font-black py-1.5 px-3 rounded-lg text-xs flex items-center gap-1.5 shadow-lg transition-all cursor-pointer">
-                    {isCalibratingScores ? <Sparkles className="w-3.5 h-3.5 animate-spin" /> : <Sliders className="w-3.5 h-3.5" />} <span>{isCalibratingScores ? "Đang cân chỉnh..." : "Cân chỉnh điểm"}</span>
+                    {isCalibratingScores ? <Sparkles className="w-3.5 h-3.5 animate-spin" /> : <Sliders className="w-3.5 h-3.5" />} <span>{isCalibratingScores ? "Đang cân chỉnh..." : calibrationSelectedIds.length >= 2 ? `Cân chỉnh ${calibrationSelectedIds.length} bài đã chọn` : "Cân chỉnh tất cả bài đã chấm"}</span>
                   </button>
                   <div className={`h-6 w-[1px] ${theme === 'dark' ? 'bg-slate-800' : 'bg-slate-300'}`}></div>
                   <div className="relative z-30">
@@ -3797,7 +3906,6 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
                   return (
                     <div key={project.id} onClick={() => { handleSelectProject(project.id); if (hasGrades) { setIsGradedDrawerOpen(true); } }} className={`relative group/item rounded-2xl overflow-hidden border flex flex-col transition-all cursor-pointer select-none hover:shadow-xl ${theme === 'dark' ? 'bg-slate-900/40' : 'bg-slate-100/50'} ${isGradingThis ? 'border-indigo-500 ring-2 ring-indigo-500/50 animate-pulse' : (isActive ? 'border-rose-500 ring-2 ring-rose-500/20' : (theme === 'dark' ? 'border-slate-800 hover:border-slate-700' : 'border-slate-200 hover:border-slate-300'))}`}>
-                      {showCalibrationSelection && hasGrades && !project.aiGradingFailed && <label onClick={event => event.stopPropagation()} className="absolute z-30 top-2 right-2 bg-violet-950/95 border border-violet-400 text-white rounded-xl px-2 py-1.5 text-[9px] font-bold flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={calibrationSelectedIds.includes(project.id)} onChange={event => setCalibrationSelectedIds(previous => event.target.checked ? [...new Set([...previous, project.id])] : previous.filter(id => id !== project.id))} />So sánh</label>}
                       <div className="relative aspect-[4/3] w-full bg-slate-950 overflow-hidden flex flex-col items-center justify-center p-2 border-b border-slate-800 gap-2">
                         {isPDF ? (
                           project.thumbnailUrl ? (
@@ -3888,6 +3996,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                             }`} 
                           />
                         </div>
+                        {hasGrades && !project.aiGradingFailed && <label onClick={event => event.stopPropagation()} className={`rounded-lg border px-2.5 py-2 text-[9px] font-bold flex items-center gap-2 cursor-pointer ${calibrationSelectedIds.includes(project.id) ? 'bg-violet-950/70 border-violet-400 text-violet-300' : theme === 'dark' ? 'bg-slate-950 border-slate-800 text-slate-400' : 'bg-white border-slate-300 text-slate-600'}`}><input type="checkbox" checked={calibrationSelectedIds.includes(project.id)} onChange={event => setCalibrationSelectedIds(previous => event.target.checked ? [...new Set([...previous, project.id])] : previous.filter(id => id !== project.id))} /> Chọn bài để so sánh và cân chỉnh</label>}
 
                         {/* Status Note display for comparison */}
                         {classList.length > 0 && (
@@ -3922,7 +4031,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                         )}
                         <div className="mt-2 text-center">
                           {hasGrades ? (
-                            <button type="button" onClick={(e) => { e.stopPropagation(); handleSelectProject(project.id); setIsGradedDrawerOpen(true); }} className={`w-full border px-3 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer ${theme === 'dark' ? 'bg-rose-950/40 hover:bg-rose-900/40 text-rose-400 hover:text-white border-rose-900/50' : 'bg-rose-50 hover:bg-rose-500 text-rose-600 hover:text-white border-rose-200'}`}>Chi tiết điểm chấm</button>
+                            <div className="grid grid-cols-2 gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); handleSelectProject(project.id); setIsGradedDrawerOpen(true); }} className={`border px-2 py-2 rounded-lg text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${theme === 'dark' ? 'bg-rose-950/40 hover:bg-rose-900/40 text-rose-400 hover:text-white border-rose-900/50' : 'bg-rose-50 hover:bg-rose-500 text-rose-600 hover:text-white border-rose-200'}`}>Chi tiết điểm</button><button type="button" onClick={(e) => { e.stopPropagation(); handleExportSingleProject(project.id); }} disabled={savingSingleProjectId === project.id} className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white px-2 py-2 rounded-lg text-[9px] font-bold uppercase tracking-wider cursor-pointer"><DownloadCloud className="w-3 h-3 inline mr-1" />{savingSingleProjectId === project.id ? 'Đang lưu' : 'Lưu JSON'}</button></div>
                           ) : (
                             <button type="button" onClick={(e) => { e.stopPropagation(); analyzeWithAI(project.id); }} disabled={(loading || batchLoading) && activeId === project.id} className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white px-3 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer">
                               {isGradingThis ? (<><Sparkles className="w-3.5 h-3.5 animate-spin" /> Đang chấm...</>) : (<><Sparkles className="w-3.5 h-3.5" /> {project.aiGradingFailed ? "Chấm lại bằng AI" : "Chấm bài bằng AI"}</>)}
@@ -4354,6 +4463,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   )}
                   {" "}| Môn học: {globalSubjectCode} - {globalSubject} - {globalGroup}
                 </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2"><span className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[9px] font-black text-cyan-300">Model chấm: {getGeminiModelLabel(activeProject.gradingModel || (activeProject.scoreVersions || []).find(version => version.id === activeProject.selectedScoreVersionId)?.gradingModel || activeGeminiModel)}</span>{activeProject.geminiFileName && <span className={`rounded-lg border px-2 py-1 text-[9px] font-bold ${activeProject.geminiFileState === 'ACTIVE' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>{activeProject.geminiFileState === 'ACTIVE' ? 'PDF đang được Gemini lưu tạm' : 'PDF Gemini cần kiểm tra lại'}</span>}</div>
               </div>
               <button type="button" onClick={() => setIsGradedDrawerOpen(false)} className={`border p-2.5 rounded-xl cursor-pointer ${theme === 'dark' ? 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white' : 'bg-white border-slate-300 text-slate-600 hover:text-slate-900'}`}><X className="w-5 h-5" /></button>
             </div>

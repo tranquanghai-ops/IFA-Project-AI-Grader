@@ -11,6 +11,7 @@
 - `src/shared/studentCsv.js`: giải mã, phân tích CSV và ánh xạ MSSV/họ tên.
 - `src/shared/projectSorting.js`: sắp xếp bài theo thứ tự nạp, tên và điểm.
 - `src/shared/aiJson.js`: đọc, làm sạch JSON do Gemini trả về.
+- `src/shared/geminiFiles.js`: kiểm tra, tải và tái sử dụng PDF qua Gemini Files API.
 
 ## Nguyên tắc sửa về sau
 
