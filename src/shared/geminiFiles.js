@@ -23,7 +23,9 @@ export const base64ToBlob = (base64, mimeType = 'application/octet-stream') => {
 
 const readMetadata = async (apiKey, fileName, signal) => {
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${encodeURIComponent(apiKey)}`, { signal });
-  if ([400, 404].includes(response.status)) return null;
+  // 403 thường xảy ra khi PDF được tải bằng một API key khác trong nhóm khóa.
+  // Xem như tệp không còn dùng được với khóa hiện tại để hệ thống tải lại một lần.
+  if ([400, 403, 404].includes(response.status)) return null;
   if (!response.ok) throw new Error(`Files API ${response.status}: ${(await response.text()).slice(0, 250)}`);
   return response.json();
 };
