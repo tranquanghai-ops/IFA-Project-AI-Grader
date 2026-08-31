@@ -45,7 +45,8 @@ import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMIN
 import { loadRubricEntry, loadRubricManifest } from './rubricLibrary';
 import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS } from './shared/geminiModels';
 import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
-import { saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
+import { parseProgressJsonStream, saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
+import { buildIfaFileEntries, createIfaPackage, readIfaPackage } from './shared/ifaPackage';
 
 
 // Khóa Gemini chỉ được nhập trên thiết bị của giảng viên và lưu cục bộ trong
@@ -53,7 +54,7 @@ import { saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersis
 const GEMINI_API_KEY_STORAGE = "ifa-thesis-gemini-api-key";
 const GEMINI_MODEL_SELECTION_STORAGE = "ifa-thesis-gemini-model-selection";
 const GEMINI_MODEL_PRIMARY = DEFAULT_GEMINI_MODEL;
-const APP_VERSION = "V1.7";
+const APP_VERSION = "V1.8";
 const PROJECT_SCHEMA_VERSION = 34;
 const GEMINI_FILE_MAX_PDF_BYTES = 50 * 1024 * 1024;
 const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 90000;
@@ -5542,14 +5543,21 @@ ${text.substring(0, 45000)}`;
     const restoredItems = [];
     const importedHistories = [];
     const errors = [];
+    const restoredSingleBlobs = new Map();
     let firstImportedMetadata = null;
 
     for (let index = 0; index < selectedFiles.length; index += 1) {
       const file = selectedFiles[index];
       try {
         showToast(`Đang đọc JSON bài ${index + 1}/${selectedFiles.length}: ${file.name}...`);
-        const rawJson = await readLargeJsonFileText(file, percent => setJsonTransferStatus({ mode: 'load', label: `Đang nạp JSON bài ${index + 1}/${selectedFiles.length}: ${file.name}`, percent }));
-        const importedData = parseJsonFileText(rawJson);
+        const importedData = await parseProgressJsonStream(file, {
+          onProgress: ({ percent, projectCount, totalProjectCount }) => setJsonTransferStatus({ mode: 'load', label: `Đang nạp JSON bài ${index + 1}/${selectedFiles.length}: ${file.name} – ${projectCount}${totalProjectCount ? `/${totalProjectCount}` : ''} bài`, percent }),
+          onProject: async (project, _projectIndex, streamedBlob) => {
+            if (!streamedBlob || !project?.id) return;
+            restoredSingleBlobs.set(project.id, streamedBlob);
+            project.base64 = '';
+          }
+        });
         if (importedData.singleProjectExport !== true || !Array.isArray(importedData.sketches) || importedData.sketches.length !== 1) {
           throw new Error("Không phải JSON lưu riêng một bài; hãy dùng nút Nạp lại tiến trình nếu đây là JSON toàn bộ.");
         }
@@ -5569,6 +5577,7 @@ ${text.substring(0, 45000)}`;
         const restoredStrategy = restoredRole === 'sua_bai' && rawProject.mimeType === 'application/pdf'
           ? 'chapter'
           : (rawProject.gradingStrategy || importedData.globalGradingStrategy || DEFAULT_GRADING_STRATEGY);
+        const hasStoredFile = Boolean((rawProject.base64 && rawProject.mimeType) || restoredSingleBlobs.has(rawProject.id));
         restoredItems.push({
           ...rawProject,
           studentName: restoredAssignment.isMatched ? restoredAssignment.name : rawProject.studentName,
@@ -5587,12 +5596,12 @@ ${text.substring(0, 45000)}`;
           aiRawResponses: rawProject.aiRawResponses || [],
           meta: { hienVat: "0", phanMem: "0", ...(rawProject.meta || {}) },
           fileUrl: null,
-          fileStoredInJson: Boolean(rawProject.base64 && rawProject.mimeType),
+          fileStoredInJson: hasStoredFile,
           fileUrlIsTemporaryPreview: false,
           isEmbeddingFile: false,
-          embeddingProgress: rawProject.base64 ? 100 : 0,
-          embeddingError: rawProject.base64 ? "" : "Tệp JSON riêng không chứa dữ liệu tệp gốc.",
-          requiresReattachAfterImport: !rawProject.base64,
+          embeddingProgress: hasStoredFile ? 100 : 0,
+          embeddingError: hasStoredFile ? "" : "Tệp JSON riêng không chứa dữ liệu tệp gốc.",
+          requiresReattachAfterImport: !hasStoredFile,
           classMatchStatus: restoredAssignment.isMatched ? 'matched' : (rawProject.classMatchStatus || 'unmatched'),
           classMatchNote: restoredAssignment.isMatched ? restoredAssignment.note : (rawProject.classMatchNote || '')
         });
@@ -5606,6 +5615,7 @@ ${text.substring(0, 45000)}`;
     }
 
     if (restoredItems.length > 0) {
+      restoredSingleBlobs.forEach((blob, projectId) => sourceFilesRef.current.set(projectId, blob));
       if (projects.length === 0 && firstImportedMetadata?.rubric) setRubric(migrateLegacySpaceRubric(firstImportedMetadata.rubric));
       if (!globalLecturer && firstImportedMetadata?.globalLecturer) setGlobalLecturer(firstImportedMetadata.globalLecturer);
       if (!globalGraduationBatch && firstImportedMetadata?.globalGraduationBatch) setGlobalGraduationBatch(firstImportedMetadata.globalGraduationBatch);
@@ -5739,6 +5749,60 @@ ${text.substring(0, 45000)}`;
     showToast(`Đã lưu bản nhẹ ${(bytes / 1024 / 1024).toFixed(1)} MB: giữ kết quả và vị trí tham chiếu, không chứa Base64.`);
   };
 
+  const handleExportIfaPackage = async () => {
+    if (isSavingProject) return;
+    setIsSavingProject(true);
+    setSaveProgressMenuLocation('');
+    try {
+      const now = new Date();
+      const timestamp = `${now.toLocaleDateString('vi-VN').replace(/\//g, '-')}_${now.toTimeString().split(' ')[0].replace(/:/g, '-')}`;
+      const fileName = `ChamDATN_${lecturerRole}_Goi_IFA_${timestamp}.ifa`;
+      const { files, lightweightProjects } = await buildIfaFileEntries(projects, getProjectSourceBlob);
+      const progressData = {
+        schemaVersion: PROJECT_SCHEMA_VERSION,
+        appVersion: APP_VERSION,
+        exportedAt: now.toISOString(),
+        ifaPackageExport: true,
+        filesEmbedded: false,
+        rubric,
+        lecturerRole,
+        globalLecturer,
+        globalGraduationBatch,
+        globalMajor,
+        globalGradingStrategy,
+        sendPdfExtractedText,
+        activeId,
+        classList,
+        classListsByRole,
+        gradingFeedbacks,
+        gradingGuide,
+        calibrationReview,
+        calibrationScope,
+        calibrationSelectedIds,
+        projectCount: lightweightProjects.length,
+        sketches: lightweightProjects,
+        historyList,
+        exportComplete: true
+      };
+      const result = await createIfaPackage({
+        fileName,
+        progressData,
+        files,
+        onProgress: ({ percent, index, total, fileName: currentFile }) => setJsonTransferStatus({
+          mode: 'save',
+          label: `Đang tạo gói IFA ${index}/${total}${currentFile ? `: ${currentFile}` : ''}`,
+          percent
+        })
+      });
+      if (!result?.cancelled) showToast(`Đã lưu gói IFA gồm ${result.fileCount} tệp gốc; không sử dụng Base64.`);
+    } catch (error) {
+      showToast(`Không thể tạo gói IFA: ${error?.message || 'Lỗi không xác định'}`, 'error');
+    } finally {
+      setJsonTransferStatus(null);
+      setIsSavingProject(false);
+    }
+  };
+
   const handleExportProject = async () => {
     if (isSavingProject) return;
     setIsSavingProject(true);
@@ -5838,7 +5902,13 @@ ${text.substring(0, 45000)}`;
     e.target.value = "";
     if (!file) return;
     try {
-        const headerText = await file.slice(0, Math.min(file.size, 1024 * 1024)).text();
+        const isIfaPackage = String(file.name || '').toLowerCase().endsWith('.ifa');
+        const packageImport = isIfaPackage ? await readIfaPackage(file, ({ percent, index, total, fileName: currentFile }) => setJsonTransferStatus({
+          mode: 'load',
+          label: `Đang nạp gói IFA – tệp ${index}/${total}${currentFile ? `: ${currentFile}` : ''}`,
+          percent
+        })) : null;
+        const headerText = isIfaPackage ? '' : await file.slice(0, Math.min(file.size, 1024 * 1024)).text();
         const isGradingProfile = /"gradingProfileExport"\s*:\s*true/.test(headerText) && !/,\s*"sketches"\s*:/.test(headerText);
         if (isGradingProfile) {
           const profileData = parseJsonFileText(await readLargeJsonFileText(file));
@@ -5855,13 +5925,13 @@ ${text.substring(0, 45000)}`;
           showToast(`Đã nạp cách chấm của giảng viên; ${projects.length} bài hiện tại và danh sách sinh viên được giữ nguyên.`);
           return;
         }
-        showToast(`Đang đọc tiến trình ${(file.size / 1024 / 1024).toFixed(1)} MB theo luồng; vui lòng chờ...`);
+        showToast(isIfaPackage ? `Đang khôi phục gói IFA ${(file.size / 1024 / 1024).toFixed(1)} MB...` : `Đang đọc tiến trình ${(file.size / 1024 / 1024).toFixed(1)} MB theo luồng; vui lòng chờ...`);
         let lastProgressMilestone = 0;
         let lastRestoredProjectCount = 0;
         // Tệp gốc được giữ ngoài React state. Mỗi bài được giải mã ngay sau khi đọc xong,
         // nhờ đó bộ nhớ đỉnh chỉ tương ứng một bài thay vì toàn bộ JSON 500 MB+.
         const restoredSourceBlobs = new Map();
-        const importedData = await parseProgressJsonByProjectStream(file, ({ progress, projectCount, totalProjectCount }) => {
+        const importedData = packageImport?.progressData || await parseProgressJsonStream(file, { onProgress: ({ percent: progress, projectCount, totalProjectCount }) => {
           setJsonTransferStatus({ mode: 'load', label: `Đang nạp tiến trình: đã đọc ${projectCount}${totalProjectCount ? `/${totalProjectCount}` : ''} bài`, percent: progress });
           if (projectCount > lastRestoredProjectCount) {
             lastRestoredProjectCount = projectCount;
@@ -5870,8 +5940,8 @@ ${text.substring(0, 45000)}`;
             lastProgressMilestone = Math.floor(progress / 10) * 10;
             showToast(`Đang nạp tiến trình JSON: ${progress}% – đã đọc ${projectCount} bài...`);
           }
-        }, async rawProject => {
-          if (!rawProject?.base64) return;
+        }, onProject: async (rawProject, _projectIndex, streamedBlob) => {
+          if (!streamedBlob && !rawProject?.base64) return;
           const extension = String(rawProject.fileName || "").split('.').pop()?.toLowerCase();
           const inferredMimeType = rawProject.mimeType || rawProject.type
             || (extension === 'pdf' ? 'application/pdf'
@@ -5879,14 +5949,29 @@ ${text.substring(0, 45000)}`;
                 : extension === 'png' ? 'image/png'
                   : extension === 'webp' ? 'image/webp'
                     : ['jpg', 'jpeg'].includes(extension) ? 'image/jpeg' : 'application/octet-stream');
-          const restoredBlob = base64ToBlob(rawProject.base64, inferredMimeType);
+          const restoredBlob = streamedBlob || base64ToBlob(rawProject.base64, inferredMimeType);
           if (!restoredBlob) throw new Error(`Không thể khôi phục dữ liệu tệp của bài ${rawProject.studentId || rawProject.fileName || 'không rõ'}.`);
           if (rawProject.id) restoredSourceBlobs.set(rawProject.id, restoredBlob);
           rawProject.mimeType = inferredMimeType;
           rawProject.base64 = "";
           rawProject.fileStoredInJson = true;
           rawProject.fileUrl = null;
-        });
+        }});
+        if (packageImport) {
+          for (const rawProject of importedData.sketches || []) {
+            const restoredBlob = packageImport.blobsByPath.get(rawProject.ifaFilePath);
+            if (!restoredBlob) continue;
+            if (rawProject.id) restoredSourceBlobs.set(rawProject.id, restoredBlob);
+            rawProject.base64 = '';
+            rawProject.fileStoredInIfa = true;
+            rawProject.fileStoredInJson = false;
+            rawProject.fileUrl = null;
+            rawProject.requiresReattachAfterImport = false;
+            rawProject.embeddingProgress = 100;
+            rawProject.embeddingError = '';
+          }
+          packageImport.blobsByPath.clear();
+        }
         if (importedData.singleProjectExport === true) {
           throw new Error("Đây là JSON riêng một bài. Hãy nạp bằng nút hợp nhất “Nộp Thuyết minh / Nạp JSON”; ứng dụng sẽ tự nhận diện và giữ các bài hiện tại.");
         }
@@ -5918,8 +6003,8 @@ ${text.substring(0, 45000)}`;
         if (importedData.calibrationReview) setCalibrationReview(importedData.calibrationReview);
         if (importedData.calibrationScope) setCalibrationScope(importedData.calibrationScope);
         setCalibrationSelectedIds(Array.isArray(importedData.calibrationSelectedIds) ? importedData.calibrationSelectedIds : []);
+        const recovered = [];
         if (importedData.sketches) {
-          const recovered = [];
           for (let projectIndex = 0; projectIndex < importedData.sketches.length; projectIndex += 1) {
             const rawProject = importedData.sketches[projectIndex];
             const migratedProject = migrateLegacySpaceProject(rawProject);
@@ -5971,12 +6056,16 @@ ${text.substring(0, 45000)}`;
     setIsFileDragging(false);
     if (!files.length) return;
 
-    const jsonFiles = files.filter(file => String(file.name || "").toLowerCase().endsWith('.json'));
-    const submissionFiles = files.filter(file => !String(file.name || "").toLowerCase().endsWith('.json'));
+    const jsonFiles = files.filter(file => /\.(?:json|ifa)$/i.test(String(file.name || "")));
+    const submissionFiles = files.filter(file => !/\.(?:json|ifa)$/i.test(String(file.name || "")));
     const fullOrProfileJsonFiles = [];
     const singleProjectJsonFiles = [];
     for (const file of jsonFiles) {
       try {
+        if (String(file.name || '').toLowerCase().endsWith('.ifa')) {
+          fullOrProfileJsonFiles.push(file);
+          continue;
+        }
         const header = await file.slice(0, Math.min(file.size, 1024 * 1024)).text();
         if (/"singleProjectExport"\s*:\s*true/.test(header)) singleProjectJsonFiles.push(file);
         else if (/"gradingProfileExport"\s*:\s*true|"sketches"\s*:/.test(header)) fullOrProfileJsonFiles.push(file);
@@ -6994,7 +7083,8 @@ ${text.substring(0, 45000)}`;
                       <DownloadCloud className={`w-3.5 h-3.5 text-rose-400 ${isSavingProject ? 'animate-pulse' : ''}`} /> <span>{isSavingProject ? "Đang tạo JSON..." : "Lưu tiến trình"}</span>{!isSavingProject && <ChevronDown className="w-3.5 h-3.5" />}
                     </button>
                     {saveProgressMenuLocation === 'step2' && !isSavingProject && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl border p-2 shadow-2xl ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                      <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm tất cả bài, PDF, điểm, nhận xét, rubric và cách chấm.</span></button>
+                      <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình – JSON Base64</b><span className="block mt-0.5 text-[9px] text-slate-500">Định dạng cũ; dung lượng lớn hơn PDF gốc.</span></button>
+                      <button type="button" onClick={handleExportIfaPackage} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-fuchsia-300' : 'hover:bg-fuchsia-50 text-fuchsia-700'}`}><b>Lưu gói IFA – khuyên dùng</b><span className="block mt-0.5 text-[9px] text-slate-500">Một tệp .ifa thực chất là ZIP; chứa JSON nhẹ và PDF gốc, không Base64.</span></button>
                       <button type="button" onClick={handleExportProjectDataOnly} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-cyan-300' : 'hover:bg-cyan-50 text-cyan-700'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="block mt-0.5 text-[9px] text-slate-500">Giữ điểm, phản hồi và dấu vân tay tệp; không chứa Base64.</span></button>
                       <button type="button" onClick={handleExportGradingProfile} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-emerald-300' : 'hover:bg-emerald-50 text-emerald-700'}`}><b>Chỉ lưu cách chấm của giảng viên</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm rubric, Hướng dẫn chấm và các quy tắc AI đã học; không chứa bài sinh viên.</span></button>
                     </div>}
@@ -7252,7 +7342,7 @@ ${text.substring(0, 45000)}`;
                   </div>
                   <label className={`bg-rose-600 hover:bg-rose-500 text-white font-bold ${projects.length === 0 ? 'py-2 px-5' : 'py-1.5 px-3'} rounded-xl ${projects.length === 0 ? 'text-xs' : 'text-[10px]'} cursor-pointer inline-flex items-center gap-2 transition-all`}>
                     <Upload className={projects.length === 0 ? "w-4 h-4" : "w-3.5 h-3.5"} /> <span>CHỌN THÊM TỆP</span>
-                    <input type="file" accept="image/*,application/pdf,.docx,.json,application/json" multiple onChange={handleUnifiedUpload} className="hidden" />
+                    <input type="file" accept="image/*,application/pdf,.docx,.json,.ifa,application/json,application/zip" multiple onChange={handleUnifiedUpload} className="hidden" />
                   </label>
                 </div>
               </div>
@@ -7301,7 +7391,8 @@ ${text.substring(0, 45000)}`;
                     <DownloadCloud className={`w-3.5 h-3.5 text-rose-400 ${isSavingProject ? 'animate-pulse' : ''}`} /><span>{isSavingProject ? "Đang tạo JSON..." : "Lưu tiến trình"}</span>{!isSavingProject && <ChevronDown className="w-3.5 h-3.5" />}
                   </button>
                   {saveProgressMenuLocation === 'step3' && !isSavingProject && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl border p-2 shadow-2xl ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                    <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình</b><span className="block mt-0.5 text-[9px] text-slate-500">Gồm bài, PDF, điểm, nhận xét và cách chấm.</span></button>
+                    <button type="button" onClick={handleExportProject} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-slate-200' : 'hover:bg-slate-50 text-slate-800'}`}><b>Lưu toàn bộ tiến trình – JSON Base64</b><span className="block mt-0.5 text-[9px] text-slate-500">Định dạng cũ; dung lượng lớn hơn PDF gốc.</span></button>
+                    <button type="button" onClick={handleExportIfaPackage} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-fuchsia-300' : 'hover:bg-fuchsia-50 text-fuchsia-700'}`}><b>Lưu gói IFA – khuyên dùng</b><span className="block mt-0.5 text-[9px] text-slate-500">Một tệp .ifa thực chất là ZIP; chứa JSON nhẹ và PDF gốc, không Base64.</span></button>
                     <button type="button" onClick={handleExportProjectDataOnly} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-cyan-300' : 'hover:bg-cyan-50 text-cyan-700'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="block mt-0.5 text-[9px] text-slate-500">Bản nhẹ, cần chọn lại tệp khi xem hoặc chấm lại.</span></button>
                     <button type="button" onClick={handleExportGradingProfile} className={`w-full text-left rounded-lg px-3 py-2.5 text-xs cursor-pointer ${theme === 'dark' ? 'hover:bg-slate-900 text-emerald-300' : 'hover:bg-emerald-50 text-emerald-700'}`}><b>Chỉ lưu cách chấm của giảng viên</b><span className="block mt-0.5 text-[9px] text-slate-500">Không chứa bài sinh viên; nạp lại sẽ giữ nguyên các bài đang có.</span></button>
                   </div>}
@@ -8158,7 +8249,7 @@ ${text.substring(0, 45000)}`;
 
       {/* HIDDEN INPUTS */}
       <input type="file" ref={rubricFileInputRef} accept=".csv" onChange={handleImportRubric} className="hidden" />
-      <input type="file" ref={unifiedUploadInputRef} accept="image/*,application/pdf,.docx,.json,application/json" multiple onChange={handleUnifiedUpload} className="hidden" />
+      <input type="file" ref={unifiedUploadInputRef} accept="image/*,application/pdf,.docx,.json,.ifa,application/json,application/zip" multiple onChange={handleUnifiedUpload} className="hidden" />
       <input type="file" ref={classListInputRef} accept=".doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleSmartClassListUpload} className="hidden" />
     </div>
   );

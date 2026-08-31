@@ -52,13 +52,14 @@ import {
 import { countGeminiKeys, getVisibleGeminiKeySlots, loadGeminiKeyPool, MAX_GEMINI_API_KEYS, saveGeminiKeyPool } from './geminiKeyPool';
 import { loadRubricEntry, loadRubricManifest, parseRubricCsv } from './rubricLibrary';
 import { DEFAULT_GEMINI_MODEL, GEMINI_MODEL_OPTIONS, getGeminiModelLabel } from './shared/geminiModels';
-import { readJsonFileWithProgress, saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
+import { parseProgressJsonStream, readJsonFileWithProgress, saveJsonDownload, stripEmbeddedFileData } from './shared/progressPersistence';
 import { PROJECT_SORT_OPTIONS, sortProjects } from './shared/projectSorting';
 import { decodeStudentCsv, extractStudentList } from './shared/studentCsv';
 import { parseAiJson } from './shared/aiJson';
 import { ensureGeminiProjectFile } from './shared/geminiFiles';
+import { buildIfaFileEntries, createIfaPackage, readIfaPackage } from './shared/ifaPackage';
 
-const APP_VERSION = "V1.7";
+const APP_VERSION = "V1.8";
 const DEFAULT_GRADING_STRATEGY = "all";
 const PDF_RENDER_SCALE = 0.9;
 const PDF_JPEG_QUALITY = 0.45;
@@ -794,19 +795,37 @@ export default function App() {
     }
   }, [pdfDoc, pdfPageNum, pdfScale]);
 
-  const base64ToBlobUrl = (base64, mimeType) => {
+  const base64ToBlob = (base64, mimeType) => {
     try {
-      const byteCharacters = atob(base64);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      if (!base64) return null;
+      const byteParts = [];
+      const chunkSize = 4 * 1024 * 1024;
+      for (let offset = 0; offset < base64.length; offset += chunkSize) {
+        const byteCharacters = atob(base64.slice(offset, offset + chunkSize));
+        const bytes = new Uint8Array(byteCharacters.length);
+        for (let index = 0; index < byteCharacters.length; index += 1) bytes[index] = byteCharacters.charCodeAt(index);
+        byteParts.push(bytes);
       }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-      return URL.createObjectURL(blob);
+      return new Blob(byteParts, { type: mimeType || 'application/octet-stream' });
     } catch (e) {
-      return `data:${mimeType};base64,${base64}`;
+      return null;
     }
+  };
+
+  const base64ToBlobUrl = (base64, mimeType) => {
+    const blob = base64ToBlob(base64, mimeType);
+    return blob ? URL.createObjectURL(blob) : null;
+  };
+
+  const getProjectSourceBlob = async project => {
+    if (project?.fileUrl) {
+      try {
+        const response = await fetch(project.fileUrl);
+        if (response.ok) return response.blob();
+      } catch (_) {}
+    }
+    if (project?.base64) return base64ToBlob(project.base64, project.mimeType);
+    return null;
   };
 
   const updateGeminiFileMetadata = (projectId, metadata = {}) => {
@@ -1608,9 +1627,9 @@ Chỉ trả về JSON, không kèm văn bản giải thích nào khác. Nếu kh
       : Array.from(eventOrFiles?.dataTransfer?.files || eventOrFiles?.target?.files || []);
     setIsFileDragging(false);
 
-    const jsonFiles = rawFiles.filter(file => String(file.name || '').toLowerCase().endsWith('.json'));
-    const submissionCandidates = rawFiles.filter(file => !String(file.name || '').toLowerCase().endsWith('.json'));
-    if (jsonFiles.length > 0) await importProjectJsonFiles(jsonFiles);
+    const progressFiles = rawFiles.filter(file => /\.(?:json|ifa)$/i.test(String(file.name || '')));
+    const submissionCandidates = rawFiles.filter(file => !/\.(?:json|ifa)$/i.test(String(file.name || '')));
+    if (progressFiles.length > 0) await importProjectJsonFiles(progressFiles);
 
     const supportedFiles = submissionCandidates.filter(file => {
       const extension = String(file.name || '').split('.').pop().toLowerCase();
@@ -2833,6 +2852,38 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     }
   };
 
+  const handleExportIfaPackage = async () => {
+    if (isSavingProject) return;
+    setIsSavingProject(true);
+    setSaveProgressMenuLocation('');
+    const fileName = makeProjectProgressFileName('Goi_IFA').replace(/\.json$/i, '.ifa');
+    try {
+      const { files, lightweightProjects } = await buildIfaFileEntries(projects, getProjectSourceBlob);
+      const progressData = buildProjectProgressMetadata({
+        ifaPackageExport: true,
+        filesEmbedded: false,
+        sketches: lightweightProjects,
+        exportComplete: true
+      });
+      const result = await createIfaPackage({
+        fileName,
+        progressData,
+        files,
+        onProgress: ({ percent, index, total, fileName: currentFile }) => setJsonTransferStatus({
+          mode: 'save',
+          label: `Đang tạo gói IFA ${index}/${total}${currentFile ? `: ${currentFile}` : ''}`,
+          percent
+        })
+      });
+      if (!result?.cancelled) showToast(`Đã lưu gói IFA gồm ${result.fileCount} tệp gốc; không sử dụng Base64.`, 'success');
+    } catch (error) {
+      showToast(`Không thể tạo gói IFA: ${error?.message || 'Lỗi không xác định'}`, 'error');
+    } finally {
+      setJsonTransferStatus(null);
+      setIsSavingProject(false);
+    }
+  };
+
   const handleExportProjectDataOnly = () => {
     if (isSavingProject) return;
     setSaveProgressMenuLocation('');
@@ -2915,6 +2966,10 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
   const restoreProjectRecord = (rawProject, sourceLabel = 'JSON') => {
     let restored = { ...rawProject };
     if (restored.base64 && restored.mimeType) restored.fileUrl = base64ToBlobUrl(restored.base64, restored.mimeType);
+    else if (restored.fileUrl) {
+      restored.requiresReattachAfterImport = false;
+      restored.embeddingError = '';
+    }
     else {
       restored.fileUrl = null;
       restored.requiresReattachAfterImport = true;
@@ -3000,10 +3055,53 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       try {
-        const rawText = await readJsonFileWithProgress(file, percent => setJsonTransferStatus({
-          mode: 'load', label: `Đang nạp JSON ${index + 1}/${files.length}: ${file.name}`, percent
-        }));
-        const result = applyImportedProjectData(JSON.parse(rawText), file.name);
+        let importedData;
+        if (String(file.name || '').toLowerCase().endsWith('.ifa')) {
+          const packageResult = await readIfaPackage(file, ({ percent, index: entryIndex, total, fileName: currentFile }) => setJsonTransferStatus({
+            mode: 'load',
+            label: `Đang nạp gói IFA ${index + 1}/${files.length} – tệp ${entryIndex}/${total}${currentFile ? `: ${currentFile}` : ''}`,
+            percent
+          }));
+          importedData = packageResult.progressData;
+          for (const project of importedData.sketches || []) {
+            const blob = packageResult.blobsByPath.get(project.ifaFilePath);
+            if (blob) {
+              project.fileUrl = URL.createObjectURL(blob);
+              project.base64 = '';
+              project.fileStoredInIfa = true;
+              project.requiresReattachAfterImport = false;
+              project.embeddingError = '';
+            }
+          }
+          packageResult.blobsByPath.clear();
+        } else {
+          const headerText = await file.slice(0, Math.min(file.size, 1024 * 1024)).text();
+          if (!/"sketches"\s*:/.test(headerText)) {
+            const rawText = await readJsonFileWithProgress(file, percent => setJsonTransferStatus({
+              mode: 'load', label: `Đang nạp cách chấm ${index + 1}/${files.length}: ${file.name}`, percent
+            }));
+            importedData = JSON.parse(rawText);
+          } else {
+            importedData = await parseProgressJsonStream(file, {
+              onProgress: ({ percent, projectCount, totalProjectCount }) => setJsonTransferStatus({
+                mode: 'load',
+                label: `Đang nạp JSON ${index + 1}/${files.length}: ${file.name} – đã đọc ${projectCount}${totalProjectCount ? `/${totalProjectCount}` : ''} bài`,
+                percent
+              }),
+              onProject: async (project, _projectIndex, streamedBlob) => {
+                let blob = streamedBlob;
+                if (blob) {
+                  project.fileUrl = URL.createObjectURL(blob);
+                  project.base64 = '';
+                  project.requiresReattachAfterImport = false;
+                  project.embeddingError = '';
+                }
+                blob = null;
+              }
+            });
+          }
+        }
+        const result = applyImportedProjectData(importedData, file.name);
         importedCount += result.count;
         if (result.type === 'profile') profileCount += 1;
       } catch (error) {
@@ -3012,8 +3110,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
       await new Promise(resolve => window.setTimeout(resolve, 0));
     }
     setJsonTransferStatus(null);
-    if (errors.length) showToast(`Đã xử lý ${files.length - errors.length}/${files.length} JSON. Lỗi: ${errors.slice(0, 2).join(' | ')}`, 'error');
-    else showToast(`Đã nạp ${importedCount} bài${profileCount ? ` và ${profileCount} cách chấm` : ''} từ ${files.length} tệp JSON.`, 'success');
+    if (errors.length) showToast(`Đã xử lý ${files.length - errors.length}/${files.length} tệp. Lỗi: ${errors.slice(0, 2).join(' | ')}`, 'error');
+    else showToast(`Đã nạp ${importedCount} bài${profileCount ? ` và ${profileCount} cách chấm` : ''} từ ${files.length} tệp JSON/IFA.`, 'success');
   };
 
   const handleImportProject = async e => {
@@ -3969,7 +4067,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                 <div className="flex items-center gap-3 flex-wrap">
                   <label className={`font-bold py-1.5 px-3 rounded-lg text-xs cursor-pointer flex items-center gap-1.5 border shadow-md transition-all ${theme === 'dark' ? 'bg-slate-800 hover:bg-slate-700 text-white border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-300'}`}>
                     <Upload className="w-3.5 h-3.5 text-rose-400" /> <span>Nộp bài / Nạp JSON...</span>
-                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,application/json" multiple onChange={handleBatchUpload} className="hidden" />
+                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,.ifa,application/json,application/zip" multiple onChange={handleBatchUpload} className="hidden" />
                   </label>
                   <label className={`font-bold py-1.5 px-3 rounded-lg text-xs flex items-center gap-2 border ${theme === 'dark' ? 'bg-indigo-950/50 text-indigo-200 border-indigo-700/50' : 'bg-indigo-50 text-indigo-800 border-indigo-200'}`}>
                     <BookOpen className="w-3.5 h-3.5" />
@@ -3993,7 +4091,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                       <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /> <span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                     </button>
                     {saveProgressMenuLocation === 'step2' && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                      <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64, điểm, nhận xét, rubric và cách chấm.</span></button>
+                      <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình – JSON Base64</b><span className="mt-0.5 block text-[9px] text-slate-500">Định dạng cũ; dung lượng lớn hơn tệp gốc.</span></button>
+                      <button type="button" onClick={handleExportIfaPackage} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-fuchsia-300 hover:bg-slate-900' : 'text-fuchsia-700 hover:bg-fuchsia-50'}`}><b>Lưu gói IFA – khuyên dùng</b><span className="mt-0.5 block text-[9px] text-slate-500">Một tệp .ifa thực chất là ZIP; chứa JSON nhẹ và bài gốc, không Base64.</span></button>
                       <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Giữ điểm, phản hồi và dấu vân tay tệp; không lưu Base64.</span></button>
                       <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm rubric, hướng dẫn và quy tắc AI đã học; không chứa bài.</span></button>
                     </div>}
@@ -4181,7 +4280,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                   </div>
                   <label className={`bg-rose-600 hover:bg-rose-500 text-white font-bold ${projects.length === 0 ? 'py-2 px-5' : 'py-1.5 px-3'} rounded-xl ${projects.length === 0 ? 'text-xs' : 'text-[10px]'} cursor-pointer inline-flex items-center gap-2 transition-all`}>
                     <Upload className={projects.length === 0 ? "w-4 h-4" : "w-3.5 h-3.5"} /> <span>CHỌN THÊM TỆP</span>
-                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,application/json" multiple onChange={handleBatchUpload} className="hidden" />
+                    <input type="file" accept="image/*,application/pdf,.doc,.docx,.json,.ifa,application/json,application/zip" multiple onChange={handleBatchUpload} className="hidden" />
                   </label>
                 </div>
               </div>
@@ -4239,7 +4338,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
                   {saveProgressMenuLocation === 'step3' && <div className={`absolute right-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64 và toàn bộ kết quả.</span></button>
+                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình – JSON Base64</b><span className="mt-0.5 block text-[9px] text-slate-500">Định dạng cũ; dung lượng lớn hơn tệp gốc.</span></button>
+                    <button type="button" onClick={handleExportIfaPackage} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-fuchsia-300 hover:bg-slate-900' : 'text-fuchsia-700 hover:bg-fuchsia-50'}`}><b>Lưu gói IFA – khuyên dùng</b><span className="mt-0.5 block text-[9px] text-slate-500">Một tệp .ifa thực chất là ZIP; chứa JSON nhẹ và bài gốc, không Base64.</span></button>
                     <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Bản nhẹ để tránh JSON hàng GB; cần chọn lại tệp khi chấm lại.</span></button>
                     <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Không chứa bài sinh viên.</span></button>
                   </div>}
@@ -4333,7 +4433,8 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
                     <DownloadCloud className="w-3.5 h-3.5 text-rose-400" /><span>Lưu tiến trình</span><ChevronDown className="w-3.5 h-3.5" />
                   </button>
                   {saveProgressMenuLocation === 'step4' && <div className={`absolute left-0 top-full mt-2 z-[200] w-80 rounded-xl shadow-2xl border p-2 ${theme === 'dark' ? 'bg-slate-950 border-slate-700' : 'bg-white border-slate-200'}`}>
-                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình</b><span className="mt-0.5 block text-[9px] text-slate-500">Gồm bài nộp Base64 và toàn bộ kết quả.</span></button>
+                    <button type="button" onClick={handleExportProject} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-slate-200 hover:bg-slate-900' : 'text-slate-800 hover:bg-slate-50'}`}><b>Lưu toàn bộ tiến trình – JSON Base64</b><span className="mt-0.5 block text-[9px] text-slate-500">Định dạng cũ; dung lượng lớn hơn tệp gốc.</span></button>
+                    <button type="button" onClick={handleExportIfaPackage} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-fuchsia-300 hover:bg-slate-900' : 'text-fuchsia-700 hover:bg-fuchsia-50'}`}><b>Lưu gói IFA – khuyên dùng</b><span className="mt-0.5 block text-[9px] text-slate-500">Một tệp .ifa thực chất là ZIP; chứa JSON nhẹ và bài gốc, không Base64.</span></button>
                     <button type="button" onClick={handleExportProjectDataOnly} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-cyan-300 hover:bg-slate-900' : 'text-cyan-700 hover:bg-cyan-50'}`}><b>Lưu dữ liệu – không kèm tệp</b><span className="mt-0.5 block text-[9px] text-slate-500">Giữ điểm và phản hồi, không chứa Base64.</span></button>
                     <button type="button" onClick={handleExportGradingStyle} className={`w-full rounded-lg px-3 py-2.5 text-left text-xs ${theme === 'dark' ? 'text-emerald-300 hover:bg-slate-900' : 'text-emerald-700 hover:bg-emerald-50'}`}><b>Chỉ lưu cách chấm</b><span className="mt-0.5 block text-[9px] text-slate-500">Không chứa bài sinh viên.</span></button>
                   </div>}
@@ -5465,7 +5566,7 @@ Trả đủ đúng một kết quả cho mỗi projectId.` }] }],
 
       {/* HIDDEN INPUTS FOR FILE HANDLING */}
       <input type="file" ref={rubricFileInputRef} accept=".csv" onChange={handleImportRubric} className="hidden" />
-      <input type="file" ref={projectFileInputRef} accept=".json,application/json" multiple onChange={handleImportProject} className="hidden" />
+      <input type="file" ref={projectFileInputRef} accept=".json,.ifa,application/json,application/zip" multiple onChange={handleImportProject} className="hidden" />
       <input type="file" ref={smartRubricInputRef} accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" onChange={handleSmartRubricUpload} className="hidden" />
       
       {/* Dynamic input for student Class List files */}

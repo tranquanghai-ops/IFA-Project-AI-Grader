@@ -98,7 +98,7 @@ function ModePicker({ onSelect }: { onSelect: (mode: GradingMode) => void }) {
         </div>
 
         <p className="mt-8 text-center text-[11px] font-semibold uppercase tracking-widest text-slate-600">
-          IFA AI Grader · Phiên bản V1.7
+          IFA AI Grader · Phiên bản V1.8
         </p>
       </div>
     </main>
